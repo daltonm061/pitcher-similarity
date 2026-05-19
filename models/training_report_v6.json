@@ -1,0 +1,345 @@
+{
+  "version": "dm_stuff_plus_v6",
+  "training_years": [
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "n_pitches_train": 5886314,
+  "n_pitchers": 1959,
+  "n_cells": 25579,
+  "cv_r2_mean": 0.11973706398381086,
+  "cv_r2_std": 0.00775219279249965,
+  "cv_mae_mean": 0.4261053137893989,
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "r2": 0.1103641169892412,
+      "mae": 0.4280425920246682,
+      "best_iter": 147
+    },
+    {
+      "fold": 1,
+      "r2": 0.11559856717041339,
+      "mae": 0.423553710061788,
+      "best_iter": 158
+    },
+    {
+      "fold": 2,
+      "r2": 0.13343103493822905,
+      "mae": 0.4232982029348372,
+      "best_iter": 172
+    },
+    {
+      "fold": 3,
+      "r2": 0.11765059670634115,
+      "mae": 0.4280349743763042,
+      "best_iter": 185
+    },
+    {
+      "fold": 4,
+      "r2": 0.12164100411482948,
+      "mae": 0.4275970895493969,
+      "best_iter": 183
+    }
+  ],
+  "per_type_r2": {
+    "4-Seam": {
+      "n": 2045846,
+      "r2": 0.14187282903919252
+    },
+    "2-Seam/Sinker": {
+      "n": 998958,
+      "r2": 0.08942434591761139
+    },
+    "Cutter": {
+      "n": 422357,
+      "r2": 0.1438026522698579
+    },
+    "Slider": {
+      "n": 431284,
+      "r2": 0.15962615982052497
+    },
+    "Sweeper": {
+      "n": 675748,
+      "r2": 0.08538418549517202
+    },
+    "Curveball": {
+      "n": 566095,
+      "r2": 0.09003044194581078
+    },
+    "Splitter": {
+      "n": 120997,
+      "r2": 0.12225302214044087
+    },
+    "Changeup": {
+      "n": 623492,
+      "r2": 0.0978248155554926
+    },
+    "Knuckleball": {
+      "n": 1537,
+      "r2": 0.35913238261157454
+    }
+  },
+  "feature_importance": {
+    "pitch_type_int": 1161704.6617012024,
+    "start_speed": 948787.6558074951,
+    "arsenal_ivb_max_other": 729304.0519065857,
+    "arsenal_hb_min_other": 722130.0455856323,
+    "arsenal_hb_max_other": 693842.4194908142,
+    "arsenal_ivb_min_other": 660020.7482147217,
+    "arsenal_hb_spread": 658659.4022216797,
+    "velo_diff": 643140.9164237976,
+    "arsenal_ivb_spread": 638439.718296051,
+    "is_same_hand": 611854.7845611572,
+    "rel_height": 351546.10218429565,
+    "arsenal_size": 350986.8259048462,
+    "spin_rate": 298932.6689605713,
+    "extension": 260229.09782028198,
+    "spin_axis_sin": 255712.78731155396,
+    "is_lefty": 182987.28121948242,
+    "nearest_other_hb_diff": 166061.28136825562,
+    "rel_side_arm": 161220.44048690796,
+    "velo_diff_secondary": 151305.30136489868,
+    "rel_side_x_typeint": 150347.29301071167,
+    "sweeper_cluster_score": 143644.23044204712,
+    "nearest_other_velo_diff": 141591.65284347534,
+    "rel_height_x_velo": 134410.03854751587,
+    "nearest_other_ivb_diff": 94990.45927429199,
+    "rel_quadrant": 84095.4349975586,
+    "ivb_in": 82434.88926315308,
+    "active_spin_rate": 71307.78363800049,
+    "spin_axis_cos": 69131.60092926025,
+    "ssw_magnitude": 48744.16237640381,
+    "vaa_aa": 38149.43199157715,
+    "bauer_units": 24453.498847961426,
+    "hb_diff": 15268.5703125
+  },
+  "outcome_correlation": {
+    "overall": {
+      "csw": {
+        "pearson": 0.3667952927161604,
+        "spearman": 0.34257150487278276
+      },
+      "whiff": {
+        "pearson": 0.3582268821253951,
+        "spearman": 0.32437220387887056
+      },
+      "xwoba": {
+        "pearson": -0.3681887524501277,
+        "spearman": -0.3591925790995795
+      },
+      "blend": {
+        "pearson": 0.4278715540601762,
+        "spearman": 0.410730673610769
+      }
+    },
+    "by_pitch_type": {
+      "4-Seam": {
+        "n": 3035,
+        "pearson_csw": 0.3556175064990523,
+        "pearson_xwoba": -0.46364382746305044,
+        "pearson_blend": 0.507540549307302,
+        "blend_formula": "csw+xwoba"
+      },
+      "2-Seam/Sinker": {
+        "n": 1695,
+        "pearson_csw": 0.27403391462513405,
+        "pearson_xwoba": -0.4531782781826198,
+        "pearson_blend": 0.45317827818261974,
+        "blend_formula": "xwoba-only"
+      },
+      "Cutter": {
+        "n": 710,
+        "pearson_csw": 0.4542064153794567,
+        "pearson_xwoba": -0.43694193026180905,
+        "pearson_blend": 0.5500396697610046,
+        "blend_formula": "csw+xwoba"
+      },
+      "Slider": {
+        "n": 1236,
+        "pearson_csw": 0.5989886923909211,
+        "pearson_xwoba": -0.49022729935368636,
+        "pearson_blend": 0.6255869497516149,
+        "blend_formula": "csw+xwoba"
+      },
+      "Sweeper": {
+        "n": 359,
+        "pearson_csw": 0.5006672555559076,
+        "pearson_xwoba": -0.35957819787702366,
+        "pearson_blend": 0.5308210964440978,
+        "blend_formula": "csw+xwoba"
+      },
+      "Curveball": {
+        "n": 788,
+        "pearson_csw": 0.5408350889953212,
+        "pearson_xwoba": -0.46069460237038795,
+        "pearson_blend": 0.603052311488532,
+        "blend_formula": "csw+xwoba"
+      },
+      "Splitter": {
+        "n": 220,
+        "pearson_csw": 0.7563274597916732,
+        "pearson_xwoba": -0.629392722526799,
+        "pearson_blend": 0.7768142714560472,
+        "blend_formula": "csw+xwoba"
+      },
+      "Changeup": {
+        "n": 1060,
+        "pearson_csw": 0.6154930803223249,
+        "pearson_xwoba": -0.5365938009480723,
+        "pearson_blend": 0.6699692007479578,
+        "blend_formula": "csw+xwoba"
+      }
+    },
+    "n_qualified": 9105
+  },
+  "ground_truth_check": [
+    {
+      "pitcher": "Hader, Josh",
+      "year": 2023,
+      "pitch_group": "Slider",
+      "expected": "elite",
+      "predicted_stuffplus": 111.05151378824091
+    },
+    {
+      "pitcher": "Chapman, Aroldis",
+      "year": 2018,
+      "pitch_group": "Slider",
+      "expected": "elite",
+      "predicted_stuffplus": 127.33671556230954
+    },
+    {
+      "pitcher": "deGrom, Jacob",
+      "year": 2021,
+      "pitch_group": "Slider",
+      "expected": "elite",
+      "predicted_stuffplus": 135.94113169686074
+    },
+    {
+      "pitcher": "Helsley, Ryan",
+      "year": 2023,
+      "pitch_group": "Slider",
+      "expected": "elite",
+      "predicted_stuffplus": 138.33861268962715
+    },
+    {
+      "pitcher": "Helsley, Ryan",
+      "year": 2024,
+      "pitch_group": "4-Seam",
+      "expected": "elite",
+      "predicted_stuffplus": 106.15430424291043
+    },
+    {
+      "pitcher": "Skubal, Tarik",
+      "year": 2024,
+      "pitch_group": "Changeup",
+      "expected": "elite",
+      "predicted_stuffplus": 139.80143326553295
+    },
+    {
+      "pitcher": "Williams, Devin",
+      "year": 2020,
+      "pitch_group": "Changeup",
+      "expected": "elite",
+      "predicted_stuffplus": 156.00051401774763
+    },
+    {
+      "pitcher": "Glasnow, Tyler",
+      "year": 2022,
+      "pitch_group": "4-Seam",
+      "expected": "elite",
+      "predicted_stuffplus": 121.62211344302789
+    },
+    {
+      "pitcher": "Glasnow, Tyler",
+      "year": 2021,
+      "pitch_group": "Curveball",
+      "expected": "elite",
+      "predicted_stuffplus": 113.56135708856652
+    },
+    {
+      "pitcher": "Duran, Jhoan",
+      "year": 2023,
+      "pitch_group": "4-Seam",
+      "expected": "elite",
+      "predicted_stuffplus": 127.07175543549853
+    },
+    {
+      "pitcher": "Miller, Mason",
+      "year": 2024,
+      "pitch_group": "4-Seam",
+      "expected": "elite",
+      "predicted_stuffplus": 125.87407480293089
+    },
+    {
+      "pitcher": "Castillo, Luis",
+      "year": 2024,
+      "pitch_group": "2-Seam/Sinker",
+      "expected": "elite",
+      "predicted_stuffplus": 102.17641757316547
+    },
+    {
+      "pitcher": "Kickham, Mike",
+      "year": 2020,
+      "pitch_group": "Slider",
+      "expected": "bad",
+      "predicted_stuffplus": 87.84340119899352
+    }
+  ],
+  "norms": {
+    "overall": {
+      "mean": 0.07924617837201406,
+      "sd": 0.218800190042484
+    },
+    "by_type": {
+      "4-Seam": {
+        "mean": 0.09741854136755367,
+        "sd": 0.23964835347847893,
+        "n": 5132
+      },
+      "2-Seam/Sinker": {
+        "mean": 0.11258191741126981,
+        "sd": 0.19186429853693499,
+        "n": 3064
+      },
+      "Cutter": {
+        "mean": 0.0535833402172767,
+        "sd": 0.2266048185476747,
+        "n": 1489
+      },
+      "Slider": {
+        "mean": 0.04031880806198353,
+        "sd": 0.24565941733413013,
+        "n": 1960
+      },
+      "Sweeper": {
+        "mean": 0.08223945484849474,
+        "sd": 0.20002240725322537,
+        "n": 2921
+      },
+      "Curveball": {
+        "mean": 0.0796125343928727,
+        "sd": 0.18792630934532423,
+        "n": 2345
+      },
+      "Splitter": {
+        "mean": 0.04615215392934266,
+        "sd": 0.2782357090649968,
+        "n": 459
+      },
+      "Changeup": {
+        "mean": 0.05143476054982829,
+        "sd": 0.2029231566315955,
+        "n": 2726
+      }
+    }
+  },
+  "median_iter": 172
+}
