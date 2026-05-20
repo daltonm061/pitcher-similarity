@@ -753,13 +753,14 @@ _MODEL_PATH = _os.path.join(_os.path.dirname(__file__), "model", "lgbm_model_202
 _V5_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v5.joblib")
 _V5_NORMS_PATH  = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v5_norms.json")
 _V6_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v6.joblib")
+_V7_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v7.joblib")
 
 @st.cache_resource
 def load_dm_v5():
     """Returns (bundle_dict, norms_dict) or (None, None) if not present.
-    Prefers v6 bundle when available; falls back to v5e.
+    Prefers v7 bundle when available; falls back to v6, then v5.
     """
-    path = _V6_BUNDLE_PATH if _os.path.exists(_V6_BUNDLE_PATH) else _V5_BUNDLE_PATH
+    path = _V7_BUNDLE_PATH if _os.path.exists(_V7_BUNDLE_PATH) else (_V6_BUNDLE_PATH if _os.path.exists(_V6_BUNDLE_PATH) else _V5_BUNDLE_PATH)
     if not _os.path.exists(path):
         return None, None
     try:
@@ -1460,8 +1461,11 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
             for grp in imputed_per_pitch:
                 imputed_per_pitch[grp].append("arsenal (MLB avg)")
         else:
-            # No defaults available (very old bundle) — single-pitch arsenal sentinel
+            # No defaults available (v6/v7 bundles) — fill with safe 0s to prevent NaN blowup
             r["arsenal_size"] = 1.0
+            for f in _ARSENAL_DEFAULT_FEATS:
+                if f != "arsenal_size":
+                    r[f] = 0.0
 
     df = _pd.DataFrame(rows)[FEATURES]
     pt_arr = df["pitch_type_int"].to_numpy()
@@ -1611,6 +1615,30 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
 _ALL_ZONES = list(range(1, 10)) + list(range(11, 27))
 
 
+# Zone v5 trained on Statcast native zones (1-9 in-zone, 11-14 outer quadrants).
+# The app's heatmap renders a 5×5 grid (zones 1-26). Map each app-zone to its
+# v5 equivalent + provide accurate spatial coordinates so the model can use
+# its plate_x_norm / plate_z_norm features (rank 2 and 8 importance).
+# Coordinates in feet (Statcast convention): plate_x ∈ [-1.5, 1.5], plate_z ∈ [0.5, 4.5].
+# normalized: plate_x_norm = plate_x / 0.83, plate_z_norm = (plate_z - 2.5) / 1.0
+_ZONE_TO_V5_AND_COORDS = {
+    # In-zone 3x3 (1-9): pass through, use inside grid centers
+    1:  (1, -0.55,  3.20),  2:  (2, 0.0,  3.20),  3:  (3, 0.55,  3.20),
+    4:  (4, -0.55,  2.50),  5:  (5, 0.0,  2.50),  6:  (6, 0.55,  2.50),
+    7:  (7, -0.55,  1.80),  8:  (8, 0.0,  1.80),  9:  (9, 0.55,  1.80),
+    # Outer ring — top (above zone):
+    11: (11, -1.30, 3.80),  12: (11, -0.55, 3.80),
+    13: (11,  0.0,  3.80),  14: (12,  0.55, 3.80),  15: (12, 1.30, 3.80),
+    # Outer ring — left side (top-to-bottom):
+    16: (11, -1.30, 3.20),  17: (11, -1.30, 2.50),  18: (13, -1.30, 1.80),
+    # Outer ring — right side (top-to-bottom):
+    19: (12,  1.30, 3.20),  20: (12,  1.30, 2.50),  21: (14,  1.30, 1.80),
+    # Outer ring — bottom (below zone):
+    22: (13, -1.30, 1.20),  23: (13, -0.55, 1.20),
+    24: (13,  0.0,  1.20),  25: (14,  0.55, 1.20),  26: (14, 1.30, 1.20),
+}
+
+
 def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R") -> dict:
     """Predict Stuff+ for every (zone, platoon) given a single pitch shape row.
 
@@ -1649,21 +1677,34 @@ def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R") -> dict:
             if val is None or (isinstance(val, float) and _np.isnan(val)):
                 shape_row[_af] = _med.get(_af, _np.nan)
 
-    # Build 52 rows: 26 zones × 2 platoons
-    # For v3+ bundles: n_pitches (typical cell size ~40) and season (current
-    # year, e.g. 2025) get filled with sensible defaults so the model doesn't
-    # rely on NaN routing.
+    # Build 52 rows: 26 zones × 2 platoons.
+    # For each app-zone (1-26), map to the v5-zone (1-14) for `zone_int` and
+    # provide accurate plate_x/z normalized coords for v5's spatial features.
+    # Count features (mean_balls, mean_strikes, pct_2k) use league-average
+    # defaults so the model gives a count-neutral prediction.
     import datetime as _dt
-    _default_n_pitches = 40.0    # median cell size in training data
     _default_season    = _dt.datetime.now().year
+    _LEAGUE_MEAN_BALLS   = 1.05   # avg balls-at-time-of-pitch league-wide
+    _LEAGUE_MEAN_STRIKES = 0.95   # avg strikes-at-time-of-pitch
+    _LEAGUE_PCT_2K       = 0.30   # fraction of pitches thrown in 2-strike counts
     rows = []
     keys = []
     for plat_key, batter_hand in (("vs_rhb", "R"), ("vs_lhb", "L")):
         is_same_hand = 1 if pitcher_hand == batter_hand else 0
         for zone in _ALL_ZONES:
             r = dict(shape_row)
-            r["zone_int"]     = zone
-            r["is_same_hand"] = is_same_hand
+            # Map app-zone → v5 zone + zone-center coordinates
+            v5_zone, _px, _pz = _ZONE_TO_V5_AND_COORDS.get(zone, (zone, 0.0, 2.5))
+            r["zone_int"]      = int(v5_zone)
+            r["is_same_hand"]  = is_same_hand
+            # v5++ spatial features (rank 2 and 8 in importance)
+            r["plate_x_norm"]  = _px / 0.83
+            r["plate_z_norm"]  = (_pz - 2.5) / 1.0
+            r["in_zone"]       = int(abs(r["plate_x_norm"]) <= 1.0 and
+                                       abs(r["plate_z_norm"]) <= 1.0)
+            # Shape × zone interactions — use the app-zone INDEX (1-26) so
+            # interactions remain expressive across the full grid; the model
+            # treated these as continuous features rather than categoricals.
             r["ivb_x_zone"]          = r.get("ivb_in", 0)           * zone
             r["hb_x_zone"]           = r.get("hb_arm_in", 0)        * zone
             r["velo_x_zone"]         = r.get("start_speed", 0)      * zone
@@ -1671,8 +1712,12 @@ def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R") -> dict:
             r["vaa_aa_x_zone"]       = r.get("vaa_aa", 0)           * zone
             r["rel_side_x_zone"]     = r.get("rel_side_arm", 0)     * zone
             r["active_spin_x_zone"]  = r.get("active_spin_rate", 0) * zone
-            # v3 features (filled with defaults if the bundle wants them)
-            r["n_pitches"] = _default_n_pitches
+            # v5++ count features (count-neutral defaults)
+            r["mean_balls"]   = _LEAGUE_MEAN_BALLS
+            r["mean_strikes"] = _LEAGUE_MEAN_STRIKES
+            r["pct_2k"]       = _LEAGUE_PCT_2K
+            # v3 legacy features (filled if bundle includes them)
+            r["n_pitches"] = 40.0
             r["season"]    = _default_season
             rows.append(r)
             keys.append((plat_key, zone))
