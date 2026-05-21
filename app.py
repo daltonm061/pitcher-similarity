@@ -755,28 +755,67 @@ _V5_NORMS_PATH  = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_
 _V6_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v6.joblib")
 _V7_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v7.joblib")
 
+_V8_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v8.joblib")
+
+
+def _is_bundle_valid(bundle):
+    """Reject bundles with placeholder norms (mean=0, sd=1 — the snapshot
+    saved BEFORE production-aligned standardization). Such bundles produce
+    wild Stuff+ values like 1186 because sp = 100 + (raw - 0)/1 * 10.
+    """
+    if not bundle:
+        return False, "empty bundle"
+    norms = bundle.get("norms", {})
+    overall = norms.get("overall", {})
+    mean = overall.get("mean")
+    sd = overall.get("sd")
+    if mean is None or sd is None:
+        return False, "missing norms.overall.mean/sd"
+    # Placeholder marker: snapshot defaults are exactly (0.0, 1.0)
+    if abs(mean) < 1e-9 and abs(sd - 1.0) < 1e-9:
+        return False, f"placeholder norms (mean={mean}, sd={sd}) — partial snapshot"
+    # Sanity: real norms have sd between 0.05 and 5.0
+    if sd < 0.01 or sd > 10.0:
+        return False, f"sd={sd:.4f} outside healthy range"
+    return True, None
+
+
 @st.cache_resource
 def load_dm_v5():
     """Returns (bundle_dict, norms_dict) or (None, None) if not present.
-    Prefers v7 bundle when available; falls back to v6, then v5.
+    Prefers highest available bundle (v8 → v7 → v6 → v5), but VALIDATES
+    each one's norms. Skips any bundle with placeholder norms (mean=0, sd=1).
     """
-    path = _V7_BUNDLE_PATH if _os.path.exists(_V7_BUNDLE_PATH) else (_V6_BUNDLE_PATH if _os.path.exists(_V6_BUNDLE_PATH) else _V5_BUNDLE_PATH)
-    if not _os.path.exists(path):
-        return None, None
-    try:
-        bundle = _joblib.load(path)
-    except Exception:
-        return None, None
-    norms = bundle.get("norms", {})
-    if _os.path.exists(_V5_NORMS_PATH):
+    candidates = [
+        ("v8", _V8_BUNDLE_PATH),
+        ("v7", _V7_BUNDLE_PATH),
+        ("v6", _V6_BUNDLE_PATH),
+        ("v5", _V5_BUNDLE_PATH),
+    ]
+    for tag, path in candidates:
+        if not _os.path.exists(path):
+            continue
         try:
-            import json as _json
-            with open(_V5_NORMS_PATH) as _f:
-                norms = _json.load(_f)
-        except Exception:
-            pass
-    print(f"  ✓ Loaded Stuff+ bundle: {path} (version={bundle.get('version','?')})")
-    return bundle, norms
+            bundle = _joblib.load(path)
+        except Exception as _e:
+            print(f"  ! {tag} at {path} failed to load: {_e}")
+            continue
+        ok, why = _is_bundle_valid(bundle)
+        if not ok:
+            print(f"  ! {tag} at {path} REJECTED — {why}")
+            continue
+        norms = bundle.get("norms", {})
+        if _os.path.exists(_V5_NORMS_PATH):
+            try:
+                import json as _json
+                with open(_V5_NORMS_PATH) as _f:
+                    norms = _json.load(_f)
+            except Exception:
+                pass
+        print(f"  ✓ Loaded Stuff+ bundle: {path} (version={bundle.get('version','?')})")
+        return bundle, norms
+    print("  ! No valid Stuff+ bundle found")
+    return None, None
 
 _v5_bundle, _v5_norms = load_dm_v5()
 _V5_AVAILABLE = _v5_bundle is not None
