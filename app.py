@@ -5556,811 +5556,871 @@ elif st.session_state.screen == "dmstuff":
 
             st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 
-            # ── Score + Share buttons ─────────────────────────────────────────
-            # #9 audit: share URL encodes the arsenal as query params
-            score_col, share_col, _ = st.columns([3, 2, 3])
-            with score_col:
-                _do_score = st.button("Compute DM Stuff+ →", key="dm_score_btn",
-                                       width='stretch', disabled=(len(dm_added) == 0))
-            with share_col:
-                if dm_added:
-                    import urllib.parse as _urlparse
-                    _share_qs = {"hand": dm_hand}
-                    if dm_rh  is not None: _share_qs["rh"]  = f"{dm_rh:.2f}"
-                    if dm_rs  is not None: _share_qs["rs"]  = f"{dm_rs:.2f}"
-                    if dm_ext is not None: _share_qs["ext"] = f"{dm_ext:.2f}"
-                    for g in dm_added:
-                        _vals = [
-                            st.session_state.get(f"dm_{g}_velo")  or "",
-                            st.session_state.get(f"dm_{g}_ivb")   or "",
-                            st.session_state.get(f"dm_{g}_hb")    or "",
-                            st.session_state.get(f"dm_{g}_spin")  or "",
-                            st.session_state.get(f"dm_{g}_usage") or "",
-                        ]
-                        _share_qs[f"p_{g}"] = ",".join(str(v) for v in _vals)
-                    _qs = _urlparse.urlencode(_share_qs)
-                    if st.button("🔗 Copy share link", key="dm_share_btn", width='stretch'):
-                        st.session_state["_dm_share_qs"] = _qs
-                        st.rerun()
-                if st.session_state.get("_dm_share_qs"):
-                    st.code(f"?{st.session_state['_dm_share_qs']}", language=None)
-                    st.markdown(
-                        "<div style='font-family:JetBrains Mono,monospace;font-size:9px;"
-                        "color:#5a7a90;margin-top:2px'>Append to your app URL to "
-                        "restore this arsenal.</div>",
-                        unsafe_allow_html=True,
-                    )
+            # ── Score + Share buttons + Results (fragment prevents page greyout) ─
+            @st.fragment
+            def _dm_results_frag():
+                # Read live state so add/remove pitch during fragment rerun is picked up
+                _dm_added = st.session_state.get("_dmsp_pitches", [])
+                _dm_hand  = st.session_state.get("dm_hand_r", "RHP")
+                _dm_rh    = st.session_state.get("dm_rh")
+                _dm_rs    = st.session_state.get("dm_rs")
+                _dm_ext   = st.session_state.get("dm_ext")
+                _auto_compute = st.session_state.pop("_dm_auto_compute", False)
 
-            # ── Results ───────────────────────────────────────────────────────
-            # Compute only when button pressed or auto-compute flag is set.
-            # Results are cached in session_state so they persist across reruns
-            # (prevents flashing when typing in input fields).
-            _auto_compute = st.session_state.pop("_dm_auto_compute", False)
-            if (_do_score or _auto_compute) and dm_added:
-                # Collect inputs
-                hand_code = "L" if dm_hand == "LHP" else "R"
-                def _pf(s):  # parse float, return None if blank/invalid
-                    try:
-                        if s is None or str(s).strip() == "":
+                # ── Score + Share buttons ─────────────────────────────────────
+                score_col, share_col, _ = st.columns([3, 2, 3])
+                with score_col:
+                    _do_score = st.button("Compute DM Stuff+ →", key="dm_score_btn",
+                                           width='stretch', disabled=(len(_dm_added) == 0))
+                with share_col:
+                    if _dm_added:
+                        import urllib.parse as _urlparse
+                        _share_qs = {"hand": _dm_hand}
+                        if _dm_rh  is not None: _share_qs["rh"]  = f"{_dm_rh:.2f}"
+                        if _dm_rs  is not None: _share_qs["rs"]  = f"{_dm_rs:.2f}"
+                        if _dm_ext is not None: _share_qs["ext"] = f"{_dm_ext:.2f}"
+                        for g in _dm_added:
+                            _vals = [
+                                st.session_state.get(f"dm_{g}_velo")  or "",
+                                st.session_state.get(f"dm_{g}_ivb")   or "",
+                                st.session_state.get(f"dm_{g}_hb")    or "",
+                                st.session_state.get(f"dm_{g}_spin")  or "",
+                                st.session_state.get(f"dm_{g}_usage") or "",
+                            ]
+                            _share_qs[f"p_{g}"] = ",".join(str(v) for v in _vals)
+                        _qs = _urlparse.urlencode(_share_qs)
+                        if st.button("🔗 Copy share link", key="dm_share_btn", width='stretch'):
+                            st.session_state["_dm_share_qs"] = _qs
+                            st.rerun()
+                    if st.session_state.get("_dm_share_qs"):
+                        st.code(f"?{st.session_state['_dm_share_qs']}", language=None)
+                        st.markdown(
+                            "<div style='font-family:JetBrains Mono,monospace;font-size:9px;"
+                            "color:#5a7a90;margin-top:2px'>Append to your app URL to "
+                            "restore this arsenal.</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                # ── Compute ───────────────────────────────────────────────────
+                if (_do_score or _auto_compute) and _dm_added:
+                    hand_code = "L" if _dm_hand == "LHP" else "R"
+                    def _pf(s):
+                        try:
+                            if s is None or str(s).strip() == "":
+                                return None
+                            return float(str(s).strip())
+                        except (TypeError, ValueError):
                             return None
-                        return float(str(s).strip())
-                    except (TypeError, ValueError):
-                        return None
 
-                pitches_dict = {}
-                missing_velo = []
-                for group in dm_added:
-                    v = _pf(st.session_state.get(f"dm_{group}_velo"))
-                    if v is None:
-                        missing_velo.append(group)
-                        continue
-                    pitches_dict[group] = {
-                        "velo":      v,
-                        "ivb":       _pf(st.session_state.get(f"dm_{group}_ivb")),
-                        "hb":        _pf(st.session_state.get(f"dm_{group}_hb")),
-                        "spin_rate": _pf(st.session_state.get(f"dm_{group}_spin")),
-                        "usage_pct": _pf(st.session_state.get(f"dm_{group}_usage")),
-                    }
-
-                if pitches_dict:
-                    scores = _score_v5_arsenal(
-                        pitches=pitches_dict,
-                        rel_height=dm_rh,
-                        rel_side=dm_rs,
-                        extension=dm_ext,
-                        hand=hand_code,
-                    )
-                    if scores:
-                        # Store basic cache immediately so results always show,
-                        # even if the expensive movement/suggestion computations fail.
-                        st.session_state["_dm_cache"] = {
-                            "scores":        scores,
-                            "pitches_dict":  pitches_dict,
-                            "hand_code":     hand_code,
-                            "dm_rh":         dm_rh,
-                            "dm_rs":         dm_rs,
-                            "dm_ext":        dm_ext,
-                            "dm_added":      list(dm_added),
-                            "missing_velo":  missing_velo,
-                            "plot":          {},
-                            "plot_error":    None,
-                            "top5":          [],
-                            "baseline_mean": 100.0,
-                            "scored_vals":   [scores[g]["stuff_plus"]
-                                              for g in dm_added if g in scores],
+                    pitches_dict = {}
+                    missing_velo = []
+                    for group in _dm_added:
+                        v = _pf(st.session_state.get(f"dm_{group}_velo"))
+                        if v is None:
+                            missing_velo.append(group)
+                            continue
+                        pitches_dict[group] = {
+                            "velo":      v,
+                            "ivb":       _pf(st.session_state.get(f"dm_{group}_ivb")),
+                            "hb":        _pf(st.session_state.get(f"dm_{group}_hb")),
+                            "spin_rate": _pf(st.session_state.get(f"dm_{group}_spin")),
+                            "usage_pct": _pf(st.session_state.get(f"dm_{group}_usage")),
                         }
 
-                        # ── Compute movement data (updates cache on success) ──
-                        try:
-                            import matplotlib.pyplot as _plt
-                            import matplotlib.patheffects as _pe
-
-                            _PLT_COLORS = {
-                                "4-Seam": "#e63946", "2-Seam/Sinker": "#f4a261",
-                                "Cutter": "#2a9d8f", "Slider": "#457b9d",
-                                "Sweeper": "#a855f7", "Curveball": "#e9c46a",
-                                "Splitter": "#f4845f", "Changeup": "#90be6d",
-                                "Knuckleball": "#adb5bd",
+                    if pitches_dict:
+                        with st.spinner("Scoring pitches…"):
+                            scores = _score_v5_arsenal(
+                                pitches=pitches_dict,
+                                rel_height=_dm_rh,
+                                rel_side=_dm_rs,
+                                extension=_dm_ext,
+                                hand=hand_code,
+                            )
+                        if scores:
+                            st.session_state["_dm_cache"] = {
+                                "scores":        scores,
+                                "pitches_dict":  pitches_dict,
+                                "hand_code":     hand_code,
+                                "dm_rh":         _dm_rh,
+                                "dm_rs":         _dm_rs,
+                                "dm_ext":        _dm_ext,
+                                "dm_added":      list(_dm_added),
+                                "missing_velo":  missing_velo,
+                                "plot":          {},
+                                "plot_error":    None,
+                                "top5":          [],
+                                "baseline_mean": 100.0,
+                                "scored_vals":   [scores[g]["stuff_plus"]
+                                                  for g in _dm_added if g in scores],
                             }
 
-                            _user_pts = {}
-                            for _g in dm_added:
-                                if _g not in scores:
-                                    continue
-                                _sr = scores[_g].get("shape_row", {})
-                                _hb_val  = pitches_dict[_g].get("hb")  if _g in pitches_dict else None
-                                _ivb_val = pitches_dict[_g].get("ivb") if _g in pitches_dict else None
-                                if _hb_val  is None: _hb_val  = _sr.get("hb_arm_in")
-                                if _ivb_val is None: _ivb_val = _sr.get("ivb_in")
-                                if _hb_val is not None and _ivb_val is not None:
-                                    _user_pts[_g] = (float(_hb_val), float(_ivb_val))
+                            # ── Movement (5×5 coarse + 5×5 fine = 50 calls/pitch) ──
+                            try:
+                                import matplotlib.pyplot as _plt
+                                import matplotlib.patheffects as _pe
 
-                            _SEARCH_BOUNDS = {
-                                "4-Seam":        {"ivb": ( 8, 25), "hb": ( 0, 20)},
-                                "2-Seam/Sinker": {"ivb": ( 2, 18), "hb": ( 5, 25)},
-                                "Cutter":        {"ivb": ( 1, 14), "hb": (-10,  8)},
-                                "Slider":        {"ivb": (-6, 10), "hb": (-20,  5)},
-                                "Sweeper":       {"ivb": (-5,  8), "hb": (-28, -3)},
-                                "Curveball":     {"ivb": (-20, 0), "hb": (-20,  5)},
-                                "Splitter":      {"ivb": (-3, 12), "hb": (  3, 20)},
-                                "Changeup":      {"ivb": ( 0, 15), "hb": (  5, 22)},
-                                "Knuckleball":   {"ivb": (-8,  8), "hb": (-10, 10)},
-                            }
+                                _PLT_COLORS = {
+                                    "4-Seam": "#e63946", "2-Seam/Sinker": "#f4a261",
+                                    "Cutter": "#2a9d8f", "Slider": "#457b9d",
+                                    "Sweeper": "#a855f7", "Curveball": "#e9c46a",
+                                    "Splitter": "#f4845f", "Changeup": "#90be6d",
+                                    "Knuckleball": "#adb5bd",
+                                }
 
-                            def _score_mean(pd_dict):
-                                _s = _score_v5_arsenal(
-                                    pitches=pd_dict,
-                                    rel_height=dm_rh, rel_side=dm_rs,
-                                    extension=dm_ext, hand=hand_code,
-                                )
-                                if not _s:
-                                    return None
-                                _u = {g: pd_dict.get(g, {}).get("usage_pct")
-                                      for g in pd_dict if g in _s}
-                                _info = _score_arsenal_combined(
-                                    {g: _s[g] for g in pd_dict if g in _s}, usage=_u,
-                                )
-                                _asp = _info.get("arsenal_stuff_plus")
-                                if _asp is not None:
-                                    return float(_asp)
-                                _vs = [_s[g]["stuff_plus"] for g in pd_dict if g in _s]
-                                return sum(_vs) / len(_vs) if _vs else None
-
-                            def _best_movement(grp, base_dict, max_delta=4.0):
-                                _bd = _SEARCH_BOUNDS.get(grp, {"ivb": (-15, 25), "hb": (-25, 25)})
-                                _pd_m = base_dict[grp]
-                                _velo_m = _pd_m.get("velo", 90)
-                                _spin_m = _pd_m.get("spin_rate")
-                                _cur_ivb_m = _pd_m.get("ivb") or _V5_MEDIANS["ivb_in"]
-                                _cur_hb_m  = _pd_m.get("hb")  or _V5_MEDIANS["hb_arm_in"]
-                                _iv_lo = max(_bd["ivb"][0], _cur_ivb_m - max_delta)
-                                _iv_hi = min(_bd["ivb"][1], _cur_ivb_m + max_delta)
-                                _hb_lo = max(_bd["hb"][0],  _cur_hb_m  - max_delta)
-                                _hb_hi = min(_bd["hb"][1],  _cur_hb_m  + max_delta)
-                                _best_sp_m = -1e9
-                                _best_iv_m, _best_hb_vm = None, None
-                                for _iv in np.linspace(_iv_lo, _iv_hi, 8):
-                                    for _hb_v in np.linspace(_hb_lo, _hb_hi, 8):
-                                        _trial = dict(base_dict)
-                                        _trial[grp] = {"velo": _velo_m, "ivb": _iv,
-                                                       "hb": _hb_v, "spin_rate": _spin_m}
-                                        _sp_m = _score_mean(_trial)
-                                        if _sp_m is not None and _sp_m > _best_sp_m:
-                                            _best_sp_m = _sp_m
-                                            _best_iv_m = _iv
-                                            _best_hb_vm = _hb_v
-                                if _best_iv_m is None:
-                                    return None, None
-                                _iv_step = (_iv_hi - _iv_lo) / 7
-                                _hb_step = (_hb_hi - _hb_lo) / 7
-                                for _iv in np.linspace(_best_iv_m - _iv_step, _best_iv_m + _iv_step, 7):
-                                    for _hb_v in np.linspace(_best_hb_vm - _hb_step, _best_hb_vm + _hb_step, 7):
-                                        _trial = dict(base_dict)
-                                        _trial[grp] = {"velo": _velo_m, "ivb": _iv,
-                                                       "hb": _hb_v, "spin_rate": _spin_m}
-                                        _sp_m = _score_mean(_trial)
-                                        if _sp_m is not None and _sp_m > _best_sp_m:
-                                            _best_sp_m = _sp_m
-                                            _best_iv_m = _iv
-                                            _best_hb_vm = _hb_v
-                                return _best_iv_m, _best_hb_vm
-
-                            _opt_dict = {g: dict(v) for g, v in pitches_dict.items()}
-                            for _g in list(pitches_dict.keys()):
-                                _oi, _oh = _best_movement(_g, _opt_dict)
-                                if _oi is not None:
-                                    _opt_dict[_g]["ivb"] = _oi
-                                    _opt_dict[_g]["hb"]  = _oh
-
-                            _opt_mean = _score_mean(_opt_dict) or 0.0
-
-                            _added_pitches = []
-                            _missing_grps = [g for g in _MLB_PITCH_MEDIANS if g not in pitches_dict]
-                            while _opt_mean < 112.0 and _missing_grps:
-                                _best_add_sp = _opt_mean
-                                _best_add_g  = None
-                                for _cand in _missing_grps:
-                                    _try = dict(_opt_dict)
-                                    _try[_cand] = dict(_MLB_PITCH_MEDIANS[_cand])
-                                    _sp_a = _score_mean(_try)
-                                    if _sp_a is not None and _sp_a > _best_add_sp:
-                                        _best_add_sp = _sp_a; _best_add_g = _cand
-                                if _best_add_g is None:
-                                    break
-                                _opt_dict[_best_add_g] = dict(_MLB_PITCH_MEDIANS[_best_add_g])
-                                _missing_grps.remove(_best_add_g)
-                                _added_pitches.append(_best_add_g)
-                                _opt_mean = _best_add_sp
-
-                            _match_pts = {}
-                            for _g, _pd_mp in _opt_dict.items():
-                                _oi_mp = _pd_mp.get("ivb"); _oh_mp = _pd_mp.get("hb")
-                                if _oi_mp is not None and _oh_mp is not None:
-                                    _match_pts[_g] = (float(_oh_mp), float(_oi_mp))
-
-                            _aplus_label = f"A+ target · avg {_opt_mean:.1f}"
-                            if _added_pitches:
-                                _aplus_label += f" (added: {', '.join(_added_pitches)})"
-
-                            st.session_state["_dm_cache"]["plot"] = {
-                                "user_pts":      _user_pts,
-                                "match_pts":     _match_pts,
-                                "aplus_label":   _aplus_label,
-                                "added_pitches": _added_pitches,
-                                "opt_mean":      _opt_mean,
-                                "plt_colors":    _PLT_COLORS,
-                            }
-                        except Exception as _plot_err:
-                            st.session_state["_dm_cache"]["plot_error"] = str(_plot_err)
-
-                        # ── Compute suggestions (updates cache on success) ────
-                        try:
-                            _FB_GROUPS_S = {"4-Seam", "2-Seam/Sinker"}
-
-                            def _rescore_mean(mod_pitches, rh=dm_rh, rs=dm_rs, ext=dm_ext, hand=hand_code):
-                                _s = _score_v5_arsenal(
-                                    pitches=mod_pitches,
-                                    rel_height=rh, rel_side=rs, extension=ext, hand=hand,
-                                )
-                                if not _s:
-                                    return None
-                                _u = {g: mod_pitches.get(g, {}).get("usage_pct")
-                                      for g in mod_pitches if g in _s}
-                                _info = _score_arsenal_combined(
-                                    {g: _s[g] for g in mod_pitches if g in _s}, usage=_u,
-                                )
-                                _asp = _info.get("arsenal_stuff_plus")
-                                if _asp is not None:
-                                    return float(_asp)
-                                vals = [_s[g]["stuff_plus"] for g in mod_pitches if g in _s]
-                                return sum(vals) / len(vals) if vals else None
-
-                            _scored_vals_sugg = [scores[g]["stuff_plus"] for g in dm_added if g in scores]
-                            _baseline_arsenal = _rescore_mean(pitches_dict)
-                            _baseline_mean = (_baseline_arsenal if _baseline_arsenal is not None
-                                              else (sum(_scored_vals_sugg) / len(_scored_vals_sugg)
-                                                    if _scored_vals_sugg else 100.0))
-
-                            _suggestions = []
-
-                            # 1. Add each missing MLB pitch type
-                            _current_pitches = set(pitches_dict.keys())
-                            for _grp, _meds in _MLB_PITCH_MEDIANS.items():
-                                if _grp in _current_pitches:
-                                    continue
-                                _try = dict(pitches_dict)
-                                _try[_grp] = dict(_meds)
-                                _new_mean = _rescore_mean(_try)
-                                if _new_mean is not None:
-                                    _delta = _new_mean - _baseline_mean
-                                    _suggestions.append((
-                                        _delta,
-                                        f"Add MLB-avg {_grp}",
-                                        f"{_meds['velo']:.1f} mph · "
-                                        f"{_meds['ivb']:+.1f}″ iVB · "
-                                        f"{_meds['hb']:+.1f}″ HB",
-                                        {"type": "add_pitch", "group": _grp,
-                                         "values": dict(_meds)},
-                                    ))
-
-                            # 2. Movement tweaks per pitch (iVB ±2.5 in, HB ±2.5 in)
-                            for _grp, _pd_s in pitches_dict.items():
-                                _cur_ivb = _pd_s.get("ivb")
-                                _cur_hb  = _pd_s.get("hb")
-                                for _feat, _cur_val, _label_feat in [
-                                    ("ivb", _cur_ivb, "iVB"),
-                                    ("hb",  _cur_hb,  "HB"),
-                                ]:
-                                    for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
-                                        _try = {g: dict(v) for g, v in pitches_dict.items()}
-                                        _new_val = (_cur_val if _cur_val is not None else
-                                                    (_V5_MEDIANS["ivb_in"] if _feat == "ivb"
-                                                     else _V5_MEDIANS["hb_arm_in"])) + _sign * 2.5
-                                        _try[_grp][_feat] = _new_val
-                                        _new_mean = _rescore_mean(_try)
-                                        if _new_mean is not None:
-                                            _delta = _new_mean - _baseline_mean
-                                            _suggestions.append((
-                                                _delta,
-                                                f"{_sign_str}2.5″ {_label_feat} on {_grp}",
-                                                f"{_new_val:+.1f}″ {_label_feat}",
-                                                {"type": "set_pitch_field", "group": _grp,
-                                                 "field": _feat, "value": round(_new_val, 1)},
-                                            ))
-
-                            # 3. Velo tweaks on offspeed/breaking pitches (±2 mph and ±3 mph)
-                            for _grp, _pd_s in pitches_dict.items():
-                                if _grp in _FB_GROUPS_S:
-                                    continue
-                                _cur_v = _pd_s.get("velo", 0)
-                                for _delta_v in [2.0, 3.0]:
-                                    for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
-                                        _try = {g: dict(v) for g, v in pitches_dict.items()}
-                                        _new_v = _cur_v + _sign * _delta_v
-                                        _try[_grp]["velo"] = _new_v
-                                        _new_mean = _rescore_mean(_try)
-                                        if _new_mean is not None:
-                                            _delta = _new_mean - _baseline_mean
-                                            _suggestions.append((
-                                                _delta,
-                                                f"{_sign_str}{_delta_v:.0f} mph on {_grp}",
-                                                f"{_new_v:.1f} mph",
-                                                {"type": "set_pitch_field", "group": _grp,
-                                                 "field": "velo", "value": round(_new_v, 1)},
-                                            ))
-
-                            # 4. Release profile tweaks
-                            _cur_rh  = dm_rh  if dm_rh  is not None else _V5_MEDIANS["rel_height"]
-                            _cur_rs  = dm_rs  if dm_rs  is not None else abs(_V5_MEDIANS["rel_side_arm"])
-                            _cur_ext = dm_ext if dm_ext is not None else _V5_MEDIANS["extension"]
-                            for _param, _cur, _lo, _hi, _label, _rh_arg, _rs_arg, _ext_arg, _ss_key in [
-                                ("rh",  _cur_rh,  3.0, 8.0, "Rel Height", None,    _cur_rs, _cur_ext, "dm_rh"),
-                                ("rs",  _cur_rs,  0.0, 5.0, "Rel Side",   _cur_rh, None,    _cur_ext, "dm_rs"),
-                                ("ext", _cur_ext, 4.0, 8.0, "Extension",  _cur_rh, _cur_rs, None,     "dm_ext"),
-                            ]:
-                                for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
-                                    _new_val = _cur + _sign * 0.25
-                                    if not (_lo <= _new_val <= _hi):
+                                _user_pts = {}
+                                for _g in _dm_added:
+                                    if _g not in scores:
                                         continue
-                                    _rh_use  = _new_val if _param == "rh"  else _rh_arg
-                                    _rs_use  = _new_val if _param == "rs"  else _rs_arg
-                                    _ext_use = _new_val if _param == "ext" else _ext_arg
-                                    _new_mean = _rescore_mean(pitches_dict, rh=_rh_use, rs=_rs_use, ext=_ext_use)
-                                    if _new_mean is not None:
-                                        _delta = _new_mean - _baseline_mean
-                                        _suggestions.append((
-                                            _delta,
-                                            f"{_sign_str}0.25 ft {_label}",
-                                            f"{_new_val:.2f} ft",
-                                            {"type": "set_release", "key": _ss_key,
-                                             "value": round(_new_val, 2)},
-                                        ))
+                                    _sr = scores[_g].get("shape_row", {})
+                                    _hb_val  = pitches_dict[_g].get("hb")  if _g in pitches_dict else None
+                                    _ivb_val = pitches_dict[_g].get("ivb") if _g in pitches_dict else None
+                                    if _hb_val  is None: _hb_val  = _sr.get("hb_arm_in")
+                                    if _ivb_val is None: _ivb_val = _sr.get("ivb_in")
+                                    if _hb_val is not None and _ivb_val is not None:
+                                        _user_pts[_g] = (float(_hb_val), float(_ivb_val))
 
-                            _suggestions.sort(key=lambda x: -x[0])
-                            st.session_state["_dm_cache"]["top5"] = [
-                                s for s in _suggestions if s[0] > 0.05
-                            ][:5]
-                            st.session_state["_dm_cache"]["baseline_mean"] = _baseline_mean
-                        except Exception:
-                            pass  # suggestions failed; top5 stays empty
+                                _SEARCH_BOUNDS = {
+                                    "4-Seam":        {"ivb": ( 8, 25), "hb": ( 0, 20)},
+                                    "2-Seam/Sinker": {"ivb": ( 2, 18), "hb": ( 5, 25)},
+                                    "Cutter":        {"ivb": ( 1, 14), "hb": (-10,  8)},
+                                    "Slider":        {"ivb": (-6, 10), "hb": (-20,  5)},
+                                    "Sweeper":       {"ivb": (-5,  8), "hb": (-28, -3)},
+                                    "Curveball":     {"ivb": (-20, 0), "hb": (-20,  5)},
+                                    "Splitter":      {"ivb": (-3, 12), "hb": (  3, 20)},
+                                    "Changeup":      {"ivb": ( 0, 15), "hb": (  5, 22)},
+                                    "Knuckleball":   {"ivb": (-8,  8), "hb": (-10, 10)},
+                                }
 
-            # ── Render from cache (persists across reruns, no flashing) ──────
-            if "_dm_cache" in st.session_state:
-                _C       = st.session_state["_dm_cache"]
-                _scores  = _C["scores"]
-                _pdict   = _C["pitches_dict"]
-                _hcode   = _C["hand_code"]
-                _c_rh    = _C["dm_rh"]
-                _c_rs    = _C["dm_rs"]
-                _c_ext   = _C["dm_ext"]
-                _c_added = _C["dm_added"]
+                                def _score_mean(pd_dict):
+                                    _s = _score_v5_arsenal(
+                                        pitches=pd_dict,
+                                        rel_height=_dm_rh, rel_side=_dm_rs,
+                                        extension=_dm_ext, hand=hand_code,
+                                    )
+                                    if not _s:
+                                        return None
+                                    _u = {g: pd_dict.get(g, {}).get("usage_pct")
+                                          for g in pd_dict if g in _s}
+                                    _info = _score_arsenal_combined(
+                                        {g: _s[g] for g in pd_dict if g in _s}, usage=_u,
+                                    )
+                                    _asp = _info.get("arsenal_stuff_plus")
+                                    if _asp is not None:
+                                        return float(_asp)
+                                    _vs = [_s[g]["stuff_plus"] for g in pd_dict if g in _s]
+                                    return sum(_vs) / len(_vs) if _vs else None
 
-                if _C.get("missing_velo"):
-                    st.markdown(
-                        f"<div style='max-width:680px;margin:16px auto;padding:14px 18px;"
-                        f"border:1px solid #c4914830;border-radius:6px;background:#1a1410;"
-                        f"font-family:JetBrains Mono,monospace;font-size:11px;color:#c0a878'>"
-                        f"⚠ Missing velocity for: {', '.join(_C['missing_velo'])} — these pitches were skipped."
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                                def _best_movement(grp, base_dict, max_delta=4.0):
+                                    _bd = _SEARCH_BOUNDS.get(grp, {"ivb": (-15, 25), "hb": (-25, 25)})
+                                    _pd_m = base_dict[grp]
+                                    _velo_m = _pd_m.get("velo", 90)
+                                    _spin_m = _pd_m.get("spin_rate")
+                                    _cur_ivb_m = _pd_m.get("ivb") or _V5_MEDIANS["ivb_in"]
+                                    _cur_hb_m  = _pd_m.get("hb")  or _V5_MEDIANS["hb_arm_in"]
+                                    _iv_lo = max(_bd["ivb"][0], _cur_ivb_m - max_delta)
+                                    _iv_hi = min(_bd["ivb"][1], _cur_ivb_m + max_delta)
+                                    _hb_lo = max(_bd["hb"][0],  _cur_hb_m  - max_delta)
+                                    _hb_hi = min(_bd["hb"][1],  _cur_hb_m  + max_delta)
+                                    _best_sp_m = -1e9
+                                    _best_iv_m, _best_hb_vm = None, None
+                                    for _iv in np.linspace(_iv_lo, _iv_hi, 5):
+                                        for _hb_v in np.linspace(_hb_lo, _hb_hi, 5):
+                                            _trial = dict(base_dict)
+                                            _trial[grp] = {"velo": _velo_m, "ivb": _iv,
+                                                           "hb": _hb_v, "spin_rate": _spin_m}
+                                            _sp_m = _score_mean(_trial)
+                                            if _sp_m is not None and _sp_m > _best_sp_m:
+                                                _best_sp_m = _sp_m
+                                                _best_iv_m = _iv
+                                                _best_hb_vm = _hb_v
+                                    if _best_iv_m is None:
+                                        return None, None
+                                    _iv_step = (_iv_hi - _iv_lo) / 4
+                                    _hb_step = (_hb_hi - _hb_lo) / 4
+                                    for _iv in np.linspace(_best_iv_m - _iv_step, _best_iv_m + _iv_step, 5):
+                                        for _hb_v in np.linspace(_best_hb_vm - _hb_step, _best_hb_vm + _hb_step, 5):
+                                            _trial = dict(base_dict)
+                                            _trial[grp] = {"velo": _velo_m, "ivb": _iv,
+                                                           "hb": _hb_v, "spin_rate": _spin_m}
+                                            _sp_m = _score_mean(_trial)
+                                            if _sp_m is not None and _sp_m > _best_sp_m:
+                                                _best_sp_m = _sp_m
+                                                _best_iv_m = _iv
+                                                _best_hb_vm = _hb_v
+                                    return _best_iv_m, _best_hb_vm
 
-                # Zone model status indicator
-                _zone_status = ""
-                if _ZONE_AVAILABLE:
-                    _z_ver = (_zone_bundle or {}).get("version", "unknown")
-                    _zone_status = (
-                        f"<span style='font-family:JetBrains Mono,monospace;"
-                        f"font-size:10px;color:#3a8a5a;margin-left:12px;"
-                        f"letter-spacing:1px'>● zone heatmaps: {_z_ver}</span>"
-                    )
-                else:
-                    _zone_status = (
-                        "<span style='font-family:JetBrains Mono,monospace;"
-                        "font-size:10px;color:#7a5a3a;margin-left:12px;"
-                        "letter-spacing:1px'>● zone heatmaps: not loaded "
-                        "(no models/zone_stuff_*.joblib found)</span>"
-                    )
-                st.markdown(
-                    "<div style='font-family:Inter,sans-serif;font-size:13px;font-weight:700;"
-                    "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
-                    "margin:24px 0 12px 0'>"
-                    f"DM Stuff+ Results{_zone_status}</div>",
-                    unsafe_allow_html=True,
-                )
+                                with st.spinner("Optimising movement profile…"):
+                                    _opt_dict = {g: dict(v) for g, v in pitches_dict.items()}
+                                    for _g in list(pitches_dict.keys()):
+                                        _oi, _oh = _best_movement(_g, _opt_dict)
+                                        if _oi is not None:
+                                            _opt_dict[_g]["ivb"] = _oi
+                                            _opt_dict[_g]["hb"]  = _oh
 
-                _v6_help = ""
-                if any(("stuff_plus_p10" in _scores[g] or
-                         "stuff_plus_vs_rhb" in _scores[g] or
-                         "nearest_pitcher" in _scores[g] or
-                         "ood_warnings" in _scores[g])
-                        for g in _c_added if g in _scores):
-                    _v6_help = (
-                        "<br><span style='color:#5a7a90'>"
-                        "range = 80% confidence interval (P10–P90) · "
-                        "vs RHB/LHB = platoon-specific Stuff+ · "
-                        "closest MLB shape = nearest pitcher by feature distance · "
-                        "⚠ = input outside training distribution."
-                        "</span>"
-                    )
-                _hm_note_pre = (
-                    "<br><span style='color:#5a7a90'>Heatmaps show predicted Stuff+ "
-                    "by zone (catcher's view; gold = elite, blue = below avg).</span>"
-                ) if _ZONE_AVAILABLE else ""
-                st.markdown(
-                    "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                    "color:#3a5a78;margin:0 0 14px 0;line-height:1.7;padding:10px 14px;"
-                    "background:#0a1218;border:1px solid #1a2a40;border-radius:6px'>"
-                    f"<b style='color:{_BRAND_GOLD}'>120+</b> elite &nbsp;·&nbsp; "
-                    "<b style='color:#a0c0d4'>105–115</b> above avg &nbsp;·&nbsp; "
-                    "<b style='color:#8a9aac'>95–105</b> avg &nbsp;·&nbsp; "
-                    "<b style='color:#6a7a8a'>&lt;95</b> below avg<br>"
-                    f"Scale: per-pitch-type, mean=100, SD=10. Trained on {_DATA_YEAR_RANGE} Statcast."
-                    + _hm_note_pre + _v6_help +
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
+                                _opt_mean = _score_mean(_opt_dict) or 0.0
 
-                for group in _c_added:
-                    if group not in _scores:
-                        continue
-                    sp_val  = _scores[group]["stuff_plus"]
-                    imputed = _scores[group]["imputed"]
-                    color   = PITCH_COLORS[group]
+                                _added_pitches = []
+                                _missing_grps = [g for g in _MLB_PITCH_MEDIANS if g not in pitches_dict]
+                                while _opt_mean < 112.0 and _missing_grps:
+                                    _best_add_sp = _opt_mean
+                                    _best_add_g  = None
+                                    for _cand in _missing_grps:
+                                        _try_d = dict(_opt_dict)
+                                        _try_d[_cand] = dict(_MLB_PITCH_MEDIANS[_cand])
+                                        _sp_a = _score_mean(_try_d)
+                                        if _sp_a is not None and _sp_a > _best_add_sp:
+                                            _best_add_sp = _sp_a; _best_add_g = _cand
+                                    if _best_add_g is None:
+                                        break
+                                    _opt_dict[_best_add_g] = dict(_MLB_PITCH_MEDIANS[_best_add_g])
+                                    _missing_grps.remove(_best_add_g)
+                                    _added_pitches.append(_best_add_g)
+                                    _opt_mean = _best_add_sp
 
-                    if sp_val >= 115:   sp_color = "#d4a848"
-                    elif sp_val >= 105: sp_color = "#a0c0d4"
-                    elif sp_val >= 95:  sp_color = "#8a9aac"
-                    else:               sp_color = "#6a7a8a"
+                                _match_pts = {}
+                                for _g, _pd_mp in _opt_dict.items():
+                                    _oi_mp = _pd_mp.get("ivb"); _oh_mp = _pd_mp.get("hb")
+                                    if _oi_mp is not None and _oh_mp is not None:
+                                        _match_pts[_g] = (float(_oh_mp), float(_oi_mp))
 
-                    imputed_user = [f for f in imputed if f in
-                                    ("ivb", "hb", "spin_rate", "rel_height",
-                                     "rel_side", "extension")]
-                    imp_str = (f"<span style='font-family:JetBrains Mono,monospace;"
-                                f"font-size:10px;color:#5a7a90'>"
-                                f"imputed: {', '.join(imputed_user)}</span>") \
-                               if imputed_user else \
-                               ("<span style='font-family:JetBrains Mono,monospace;"
-                                "font-size:10px;color:#5ac8a040'>all fields provided</span>")
+                                _aplus_label = f"A+ target · avg {_opt_mean:.1f}"
+                                if _added_pitches:
+                                    _aplus_label += f" (added: {', '.join(_added_pitches)})"
 
-                    _sd = _scores[group]
-                    _ci_html = ""
-                    if "stuff_plus_p10" in _sd and "stuff_plus_p90" in _sd:
-                        _ci_html = (
+                                st.session_state["_dm_cache"]["plot"] = {
+                                    "user_pts":      _user_pts,
+                                    "match_pts":     _match_pts,
+                                    "aplus_label":   _aplus_label,
+                                    "added_pitches": _added_pitches,
+                                    "opt_mean":      _opt_mean,
+                                    "plt_colors":    _PLT_COLORS,
+                                }
+                            except Exception as _plot_err:
+                                st.session_state["_dm_cache"]["plot_error"] = str(_plot_err)
+
+                            # ── Suggestions ───────────────────────────────────
+                            try:
+                                _FB_GROUPS_S = {"4-Seam", "2-Seam/Sinker"}
+
+                                def _rescore_mean(mod_pitches, rh=_dm_rh, rs=_dm_rs,
+                                                  ext=_dm_ext, hand=hand_code):
+                                    _s = _score_v5_arsenal(
+                                        pitches=mod_pitches,
+                                        rel_height=rh, rel_side=rs, extension=ext, hand=hand,
+                                    )
+                                    if not _s:
+                                        return None
+                                    _u = {g: mod_pitches.get(g, {}).get("usage_pct")
+                                          for g in mod_pitches if g in _s}
+                                    _info = _score_arsenal_combined(
+                                        {g: _s[g] for g in mod_pitches if g in _s}, usage=_u,
+                                    )
+                                    _asp = _info.get("arsenal_stuff_plus")
+                                    if _asp is not None:
+                                        return float(_asp)
+                                    vals = [_s[g]["stuff_plus"] for g in mod_pitches if g in _s]
+                                    return sum(vals) / len(vals) if vals else None
+
+                                _scored_vals_sugg = [scores[g]["stuff_plus"]
+                                                     for g in _dm_added if g in scores]
+                                _baseline_arsenal = _rescore_mean(pitches_dict)
+                                _baseline_mean = (_baseline_arsenal if _baseline_arsenal is not None
+                                                  else (sum(_scored_vals_sugg) / len(_scored_vals_sugg)
+                                                        if _scored_vals_sugg else 100.0))
+
+                                _suggestions = []
+
+                                with st.spinner("Computing suggestions…"):
+                                    # 1. Add each missing MLB pitch type
+                                    _current_pitches = set(pitches_dict.keys())
+                                    for _grp, _meds in _MLB_PITCH_MEDIANS.items():
+                                        if _grp in _current_pitches:
+                                            continue
+                                        _try_d = dict(pitches_dict)
+                                        _try_d[_grp] = dict(_meds)
+                                        _new_mean = _rescore_mean(_try_d)
+                                        if _new_mean is not None:
+                                            _delta = _new_mean - _baseline_mean
+                                            _suggestions.append((
+                                                _delta,
+                                                f"Add MLB-avg {_grp}",
+                                                f"{_meds['velo']:.1f} mph · "
+                                                f"{_meds['ivb']:+.1f}″ iVB · "
+                                                f"{_meds['hb']:+.1f}″ HB",
+                                                {"type": "add_pitch", "group": _grp,
+                                                 "values": dict(_meds)},
+                                            ))
+
+                                    # 2. Movement tweaks (iVB ±2.5 in, HB ±2.5 in)
+                                    for _grp, _pd_s in pitches_dict.items():
+                                        _cur_ivb = _pd_s.get("ivb")
+                                        _cur_hb  = _pd_s.get("hb")
+                                        for _feat, _cur_val, _label_feat in [
+                                            ("ivb", _cur_ivb, "iVB"),
+                                            ("hb",  _cur_hb,  "HB"),
+                                        ]:
+                                            for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
+                                                _try_d = {g: dict(v) for g, v in pitches_dict.items()}
+                                                _new_val = (_cur_val if _cur_val is not None else
+                                                            (_V5_MEDIANS["ivb_in"] if _feat == "ivb"
+                                                             else _V5_MEDIANS["hb_arm_in"])) + _sign * 2.5
+                                                _try_d[_grp][_feat] = _new_val
+                                                _new_mean = _rescore_mean(_try_d)
+                                                if _new_mean is not None:
+                                                    _delta = _new_mean - _baseline_mean
+                                                    _suggestions.append((
+                                                        _delta,
+                                                        f"{_sign_str}2.5″ {_label_feat} on {_grp}",
+                                                        f"{_new_val:+.1f}″ {_label_feat}",
+                                                        {"type": "set_pitch_field", "group": _grp,
+                                                         "field": _feat, "value": round(_new_val, 1)},
+                                                    ))
+
+                                    # 3. Velo tweaks on offspeed/breaking (±2 mph and ±3 mph)
+                                    for _grp, _pd_s in pitches_dict.items():
+                                        if _grp in _FB_GROUPS_S:
+                                            continue
+                                        _cur_v = _pd_s.get("velo", 0)
+                                        for _delta_v in [2.0, 3.0]:
+                                            for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
+                                                _try_d = {g: dict(v) for g, v in pitches_dict.items()}
+                                                _new_v = _cur_v + _sign * _delta_v
+                                                _try_d[_grp]["velo"] = _new_v
+                                                _new_mean = _rescore_mean(_try_d)
+                                                if _new_mean is not None:
+                                                    _delta = _new_mean - _baseline_mean
+                                                    _suggestions.append((
+                                                        _delta,
+                                                        f"{_sign_str}{_delta_v:.0f} mph on {_grp}",
+                                                        f"{_new_v:.1f} mph",
+                                                        {"type": "set_pitch_field", "group": _grp,
+                                                         "field": "velo", "value": round(_new_v, 1)},
+                                                    ))
+
+                                    # 4. Release profile tweaks
+                                    _cur_rh  = _dm_rh  if _dm_rh  is not None else _V5_MEDIANS["rel_height"]
+                                    _cur_rs  = _dm_rs  if _dm_rs  is not None else abs(_V5_MEDIANS["rel_side_arm"])
+                                    _cur_ext = _dm_ext if _dm_ext is not None else _V5_MEDIANS["extension"]
+                                    for _param, _cur, _lo, _hi, _label, _rh_arg, _rs_arg, _ext_arg, _ss_key in [
+                                        ("rh",  _cur_rh,  3.0, 8.0, "Rel Height", None,    _cur_rs, _cur_ext, "dm_rh"),
+                                        ("rs",  _cur_rs,  0.0, 5.0, "Rel Side",   _cur_rh, None,    _cur_ext, "dm_rs"),
+                                        ("ext", _cur_ext, 4.0, 8.0, "Extension",  _cur_rh, _cur_rs, None,     "dm_ext"),
+                                    ]:
+                                        for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
+                                            _new_val = _cur + _sign * 0.25
+                                            if not (_lo <= _new_val <= _hi):
+                                                continue
+                                            _rh_use  = _new_val if _param == "rh"  else _rh_arg
+                                            _rs_use  = _new_val if _param == "rs"  else _rs_arg
+                                            _ext_use = _new_val if _param == "ext" else _ext_arg
+                                            _new_mean = _rescore_mean(
+                                                pitches_dict, rh=_rh_use, rs=_rs_use, ext=_ext_use)
+                                            if _new_mean is not None:
+                                                _delta = _new_mean - _baseline_mean
+                                                _suggestions.append((
+                                                    _delta,
+                                                    f"{_sign_str}0.25 ft {_label}",
+                                                    f"{_new_val:.2f} ft",
+                                                    {"type": "set_release", "key": _ss_key,
+                                                     "value": round(_new_val, 2)},
+                                                ))
+
+                                    # 5. Usage ±10 percentage points
+                                    for _grp, _pd_s in pitches_dict.items():
+                                        _cur_usage = _pd_s.get("usage_pct")
+                                        if _cur_usage is None:
+                                            continue
+                                        for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
+                                            _new_usage = _cur_usage + _sign * 10.0
+                                            if _new_usage < 0 or _new_usage > 100:
+                                                continue
+                                            _try_d = {g: dict(v) for g, v in pitches_dict.items()}
+                                            _try_d[_grp]["usage_pct"] = _new_usage
+                                            _new_mean = _rescore_mean(_try_d)
+                                            if _new_mean is not None:
+                                                _delta = _new_mean - _baseline_mean
+                                                _suggestions.append((
+                                                    _delta,
+                                                    f"{_sign_str}10% usage on {_grp}",
+                                                    f"{_new_usage:.0f}% usage",
+                                                    {"type": "set_pitch_field", "group": _grp,
+                                                     "field": "usage", "value": round(_new_usage, 1)},
+                                                ))
+
+                                    # 6. Remove each pitch
+                                    if len(pitches_dict) > 1:
+                                        for _grp in list(pitches_dict.keys()):
+                                            _try_d = {g: dict(v) for g, v in pitches_dict.items()
+                                                      if g != _grp}
+                                            _new_mean = _rescore_mean(_try_d)
+                                            if _new_mean is not None:
+                                                _delta = _new_mean - _baseline_mean
+                                                _suggestions.append((
+                                                    _delta,
+                                                    f"Remove {_grp}",
+                                                    f"{len(pitches_dict) - 1}-pitch arsenal",
+                                                    {"type": "remove_pitch", "group": _grp},
+                                                ))
+
+                                _suggestions.sort(key=lambda x: -x[0])
+                                st.session_state["_dm_cache"]["top5"] = [
+                                    s for s in _suggestions if s[0] > 0.05
+                                ][:5]
+                                st.session_state["_dm_cache"]["baseline_mean"] = _baseline_mean
+                            except Exception:
+                                pass  # suggestions failed; top5 stays empty
+
+                            if _auto_compute:
+                                # Sync input widgets after an Apply → action
+                                st.rerun(scope="app")
+
+                # ── Render from cache ─────────────────────────────────────────
+                if "_dm_cache" in st.session_state:
+                    _C       = st.session_state["_dm_cache"]
+                    _scores  = _C["scores"]
+                    _pdict   = _C["pitches_dict"]
+                    _hcode   = _C["hand_code"]
+                    _c_rh    = _C["dm_rh"]
+                    _c_rs    = _C["dm_rs"]
+                    _c_ext   = _C["dm_ext"]
+                    _c_added = _C["dm_added"]
+
+                    if _C.get("missing_velo"):
+                        st.markdown(
+                            f"<div style='max-width:680px;margin:16px auto;padding:14px 18px;"
+                            f"border:1px solid #c4914830;border-radius:6px;background:#1a1410;"
+                            f"font-family:JetBrains Mono,monospace;font-size:11px;color:#c0a878'>"
+                            f"⚠ Missing velocity for: {', '.join(_C['missing_velo'])} — these pitches were skipped."
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    # Zone model status indicator
+                    _zone_status = ""
+                    if _ZONE_AVAILABLE:
+                        _z_ver = (_zone_bundle or {}).get("version", "unknown")
+                        _zone_status = (
                             f"<span style='font-family:JetBrains Mono,monospace;"
-                            f"font-size:10px;color:#5a7a90;margin-left:8px'>"
-                            f"range {_sd['stuff_plus_p10']}–{_sd['stuff_plus_p90']}</span>"
+                            f"font-size:10px;color:#3a8a5a;margin-left:12px;"
+                            f"letter-spacing:1px'>● zone heatmaps: {_z_ver}</span>"
                         )
-                    _plat_html = ""
-                    if "stuff_plus_vs_rhb" in _sd and "stuff_plus_vs_lhb" in _sd:
-                        _plat_html = (
-                            f"<div style='font-family:JetBrains Mono,monospace;"
-                            f"font-size:10px;color:#7a9ab0;margin-top:3px'>"
-                            f"vs RHB: <b style='color:#a0c0d4'>{_sd['stuff_plus_vs_rhb']}</b>"
-                            f" &nbsp;·&nbsp; vs LHB: <b style='color:#a0c0d4'>{_sd['stuff_plus_vs_lhb']}</b>"
-                            f"</div>"
-                        )
-                    _nn_html = ""
-                    if "nearest_pitcher" in _sd:
-                        _nn = _sd["nearest_pitcher"]
-                        _nn_html = (
-                            f"<div style='font-family:JetBrains Mono,monospace;"
-                            f"font-size:10px;color:#6a8a9a;margin-top:3px'>"
-                            f"closest MLB shape: <b style='color:#c0d8e8'>"
-                            f"{_nn['name']} ({_nn['year']})</b>"
-                            f"</div>"
-                        )
-                    _ood_html = ""
-                    if "ood_warnings" in _sd and _sd["ood_warnings"]:
-                        _ood_items = []
-                        for w in _sd["ood_warnings"][:3]:
-                            _color = "#d4a848" if w["severity"] == "extreme" else "#c0a878"
-                            _ood_items.append(
-                                f"<span style='color:{_color}'>"
-                                f"{w['feat']}={w['value']} (typical: "
-                                f"{w['range'][0]}–{w['range'][1]})</span>"
-                            )
-                        _ood_html = (
-                            "<div style='font-family:JetBrains Mono,monospace;"
-                            "font-size:10px;color:#c0a878;margin-top:3px;"
-                            "border-top:1px dashed #c4914830;padding-top:4px'>"
-                            "⚠ outside training range: "
-                            + " &nbsp;·&nbsp; ".join(_ood_items)
-                            + "</div>"
-                        )
-
-                    st.markdown(
-                        f"<div style='display:flex;align-items:center;justify-content:space-between;"
-                        f"padding:14px 20px;margin-bottom:8px;"
-                        f"background:linear-gradient(165deg,#0e1828 0%,#0c1420 100%);"
-                        f"border-left:3px solid {color};border-radius:6px'>"
-                        f"<div style='display:flex;flex-direction:column;gap:4px;flex:1'>"
-                        f"<div style='font-family:Inter,sans-serif;font-size:13px;"
-                        f"font-weight:700;color:{color};letter-spacing:2px;"
-                        f"text-transform:uppercase'>{group}</div>"
-                        f"<div>{imp_str}{_ci_html}</div>"
-                        f"{_plat_html}{_nn_html}{_ood_html}"
-                        f"</div>"
-                        f"<div style='font-family:Inter,sans-serif;font-size:32px;"
-                        f"font-weight:800;color:{sp_color};margin-left:16px'>{sp_val}</div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-
-                    # Zone-Stuff+ heatmaps
-                    if _ZONE_AVAILABLE and "shape_row" in _scores[group]:
-                        shape_row = _scores[group]["shape_row"]
-                        zone_grid = _score_zone_grid(shape_row, pitcher_hand=_hcode)
-                        _z_cov_all = (_zone_bundle or {}).get("zone_coverage") or {}
-                        _z_cov = _z_cov_all.get(group) if isinstance(_z_cov_all, dict) else None
-                        if zone_grid:
-                            hm_rhb = _render_zone_heatmap_svg(
-                                zone_grid["vs_rhb"], "vs RHB", zone_coverage=_z_cov,
-                            )
-                            hm_lhb = _render_zone_heatmap_svg(
-                                zone_grid["vs_lhb"], "vs LHB", zone_coverage=_z_cov,
-                            )
-                            hm_cols = st.columns([1, 1])
-                            with hm_cols[0]:
-                                st.markdown(hm_rhb, unsafe_allow_html=True)
-                            with hm_cols[1]:
-                                st.markdown(hm_lhb, unsafe_allow_html=True)
-                            st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
-
-                # ── Arsenal Grade ─────────────────────────────────────────────
-                _scored_vals = _C.get("scored_vals", [])
-                if _scored_vals:
-                    _usage_dict = {
-                        g: _pdict.get(g, {}).get("usage_pct")
-                        for g in _c_added if g in _scores
-                    }
-                    _arsenal_info = _score_arsenal_combined(
-                        {g: _scores[g] for g in _c_added if g in _scores},
-                        usage=_usage_dict,
-                    )
-                    _arsenal_sp     = _arsenal_info.get("arsenal_stuff_plus", 100.0)
-                    _arsenal_sp_rhb = _arsenal_info.get("arsenal_stuff_plus_vs_rhb")
-                    _arsenal_sp_lhb = _arsenal_info.get("arsenal_stuff_plus_vs_lhb")
-                    _grade_subtitle = (
-                        "Usage-weighted raw aggregation, league-standardized"
-                        if _arsenal_info.get("method") == "raw_aggregation"
-                        else "Unweighted avg (no arsenal norms in bundle)"
-                    )
-
-                    if _arsenal_sp >= 120:   _grade = "A+"
-                    elif _arsenal_sp >= 112: _grade = "A"
-                    elif _arsenal_sp >= 107: _grade = "B+"
-                    elif _arsenal_sp >= 102: _grade = "B"
-                    elif _arsenal_sp >= 97:  _grade = "C+"
-                    elif _arsenal_sp >= 92:  _grade = "C"
-                    else:                    _grade = "D"
-
-                    if _arsenal_sp >= 107:   _grade_color = _BRAND_GOLD
-                    elif _arsenal_sp >= 97:  _grade_color = "#a0c0d4"
-                    elif _arsenal_sp >= 87:  _grade_color = "#8a9aac"
-                    else:                    _grade_color = "#6a7a8a"
-
-                    _platoon_html = ""
-                    if _arsenal_sp_rhb is not None and _arsenal_sp_lhb is not None:
-                        _platoon_html = (
-                            "<div style='font-family:JetBrains Mono,monospace;"
-                            "font-size:10px;color:#7a9ab0;margin-top:3px'>"
-                            f"vs RHB: <b style='color:#a0c0d4'>{_arsenal_sp_rhb}</b>"
-                            f" &nbsp;·&nbsp; vs LHB: <b style='color:#a0c0d4'>{_arsenal_sp_lhb}</b>"
-                            "</div>"
+                    else:
+                        _zone_status = (
+                            "<span style='font-family:JetBrains Mono,monospace;"
+                            "font-size:10px;color:#7a5a3a;margin-left:12px;"
+                            "letter-spacing:1px'>● zone heatmaps: not loaded "
+                            "(no models/zone_stuff_*.joblib found)</span>"
                         )
                     st.markdown(
-                        "<div style='margin:28px 0 8px 0;padding:18px 24px;"
-                        "background:linear-gradient(165deg,#0e1828,#0a1520);"
-                        "border:1px solid #1a2a40;border-radius:8px;"
-                        "display:flex;align-items:center;justify-content:space-between'>"
-                        "<div>"
-                        "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
-                        f"color:{_BRAND_GOLD};letter-spacing:2px;text-transform:uppercase;"
-                        "margin-bottom:4px'>Arsenal Stuff+</div>"
-                        "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                        f"color:#3a5a78'>{_grade_subtitle}</div>"
-                        f"{_platoon_html}"
-                        "</div>"
-                        "<div style='display:flex;align-items:baseline;gap:14px'>"
-                        f"<div style='font-family:Inter,sans-serif;font-size:36px;"
-                        f"font-weight:800;color:{_grade_color}'>{_arsenal_sp:.1f}</div>"
-                        f"<div style='font-family:Inter,sans-serif;font-size:22px;"
-                        f"font-weight:700;color:{_grade_color};opacity:0.7'>{_grade}</div>"
-                        "</div></div>",
+                        "<div style='font-family:Inter,sans-serif;font-size:13px;font-weight:700;"
+                        "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
+                        "margin:24px 0 12px 0'>"
+                        f"DM Stuff+ Results{_zone_status}</div>",
                         unsafe_allow_html=True,
                     )
-
-                # ── Movement Plot ─────────────────────────────────────────────
-                st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
-                st.markdown(
-                    "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
-                    "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
-                    "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
-                    "● Movement Profile vs Closest A+ Arsenal</div>",
-                    unsafe_allow_html=True,
-                )
-                _cplot = _C.get("plot", {})
-                if _cplot:
-                    try:
-                        import matplotlib.pyplot as _plt
-                        import matplotlib.patheffects as _pe
-                        from matplotlib.lines import Line2D as _L2D
-
-                        _user_pts_r   = _cplot["user_pts"]
-                        _match_pts_r  = _cplot["match_pts"]
-                        _aplus_label  = _cplot["aplus_label"]
-                        _added_pitches_r = _cplot["added_pitches"]
-                        _PLT_COLORS_R = _cplot["plt_colors"]
-
-                        _fig, _ax = _plt.subplots(figsize=(4, 3.2))
-                        _fig.patch.set_facecolor("#0c1420")
-                        _ax.set_facecolor("#0e1828")
-                        for _spine in _ax.spines.values():
-                            _spine.set_edgecolor("#1a2a40")
-                        _ax.tick_params(colors="#5a7a90", labelsize=9)
-                        _ax.set_xlabel("Horizontal Break — arm-side + (in)", color="#5a7a90", fontsize=10)
-                        _ax.set_ylabel("Induced Vertical Break (in)", color="#5a7a90", fontsize=10)
-                        _ax.set_xlim(-25, 25)
-                        _ax.set_ylim(-25, 25)
-                        _ax.axhline(0, color="#1a2a40", lw=1, zorder=0)
-                        _ax.axvline(0, color="#1a2a40", lw=1, zorder=0)
-                        _ax.grid(True, color="#1a2a40", lw=0.5, alpha=0.6, zorder=0)
-
-                        for _g, (_hb, _ivb) in _match_pts_r.items():
-                            _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
-                            _ax.scatter(_hb, _ivb, s=180, facecolors="none",
-                                        edgecolors=_c, linewidths=2,
-                                        marker="D", alpha=0.7, zorder=3)
-
-                        _plotted = []
-                        for _g, (_hb, _ivb) in _user_pts_r.items():
-                            _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
-                            _ax.scatter(_hb, _ivb, s=220, color=_c,
-                                        edgecolors="white", linewidths=1.2,
-                                        marker="o", zorder=5, label=_g)
-                            _ax.annotate(_g, (_hb, _ivb),
-                                         textcoords="offset points", xytext=(8, 5),
-                                         fontsize=8, color=_c,
-                                         path_effects=[_pe.withStroke(linewidth=2, foreground="#0e1828")])
-                            _plotted.append(_g)
-
-                        for _g in _plotted:
-                            if _g in _match_pts_r:
-                                _ux, _uy = _user_pts_r[_g]
-                                _mx, _my = _match_pts_r[_g]
-                                _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
-                                _ax.plot([_ux, _mx], [_uy, _my],
-                                         color=_c, lw=1, linestyle="--", alpha=0.35, zorder=2)
-
-                        _legend_elems = [
-                            _L2D([0],[0], marker="o", color="w", markerfacecolor="#aaaaaa",
-                                 markersize=8, label="Your arsenal", linestyle="None"),
-                            _L2D([0],[0], marker="D", color="w", markerfacecolor="none",
-                                 markeredgecolor="#aaaaaa", markersize=8,
-                                 label="A+ target", linestyle="None"),
-                        ]
-                        _ax.legend(handles=_legend_elems, facecolor="#0e1828",
-                                   edgecolor="#1a2a40", labelcolor="#a0c0d4",
-                                   fontsize=7, loc="best")
-                        _plt.tight_layout(pad=1.0)
-                        st.pyplot(_fig, use_container_width=True)
-                        _plt.close(_fig)
-
-                        _caption = (
-                            f"<b style='color:#a0c0d4'>{_aplus_label}</b> — "
-                            "diamonds show the optimised IVB/HB for your pitch types "
-                            "(same velo &amp; release) that maximises Stuff+."
+    
+                    _v6_help = ""
+                    if any(("stuff_plus_p10" in _scores[g] or
+                             "stuff_plus_vs_rhb" in _scores[g] or
+                             "nearest_pitcher" in _scores[g] or
+                             "ood_warnings" in _scores[g])
+                            for g in _c_added if g in _scores):
+                        _v6_help = (
+                            "<br><span style='color:#5a7a90'>"
+                            "range = 80% confidence interval (P10–P90) · "
+                            "vs RHB/LHB = platoon-specific Stuff+ · "
+                            "closest MLB shape = nearest pitcher by feature distance · "
+                            "⚠ = input outside training distribution."
+                            "</span>"
                         )
-                        if _added_pitches_r:
-                            _caption += (
-                                f" Reaching A+ required adding: "
-                                f"<b style='color:#c49148'>{', '.join(_added_pitches_r)}</b>."
-                            )
-                        st.markdown(
-                            f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                            f"color:#3a5a78;margin-top:6px;padding:0 4px;line-height:1.6'>"
-                            f"{_caption}</div>",
-                            unsafe_allow_html=True,
-                        )
-                    except Exception as _plot_err2:
-                        st.markdown(
-                            f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                            f"color:#5a3a3a;padding:8px'>Movement plot unavailable: {_plot_err2}</div>",
-                            unsafe_allow_html=True,
-                        )
-                elif _C.get("plot_error"):
-                    st.markdown(
-                        f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                        f"color:#5a3a3a;padding:8px'>Movement plot unavailable: {_C['plot_error']}</div>",
-                        unsafe_allow_html=True,
-                    )
-
-                # ── Top 5 Improvement Suggestions ────────────────────────────
-                st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
-                st.markdown(
-                    "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
-                    "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
-                    "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
-                    "● Top 5 Improvement Suggestions</div>",
-                    unsafe_allow_html=True,
-                )
-
-                def _apply_suggestion(action):
-                    """Apply a suggestion to session_state and trigger re-compute."""
-                    t = action["type"]
-                    if t == "add_pitch":
-                        grp = action["group"]
-                        pitches_list = st.session_state.setdefault("_dmsp_pitches", [])
-                        if grp not in pitches_list:
-                            pitches_list.append(grp)
-                        vals = action.get("values", {})
-                        _SUFFIX = {"velo": "_velo", "ivb": "_ivb",
-                                    "hb": "_hb", "spin_rate": "_spin"}
-                        for _field, _suf in _SUFFIX.items():
-                            if _field in vals and vals[_field] is not None:
-                                st.session_state[f"dm_{grp}{_suf}"] = f"{vals[_field]}"
-                    elif t == "set_pitch_field":
-                        grp = action["group"]
-                        _suf_map = {"velo": "_velo", "ivb": "_ivb",
-                                     "hb": "_hb", "spin_rate": "_spin"}
-                        suf = _suf_map[action["field"]]
-                        st.session_state[f"dm_{grp}{suf}"] = f"{action['value']}"
-                    elif t == "set_release":
-                        st.session_state[action["key"]] = float(action["value"])
-                    st.session_state["_dm_auto_compute"] = True
-
-                _top5 = _C.get("top5", [])
-                if not _top5:
-                    st.markdown(
-                        "<div style='font-family:JetBrains Mono,monospace;font-size:11px;"
-                        "color:#3a5a78;padding:16px 0'>No tested changes improved the arsenal score.</div>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    for _rank, (_delta, _lbl, _detail, _action) in enumerate(_top5, 1):
-                        if _delta >= 2.0:   _d_color = _BRAND_GOLD
-                        elif _delta >= 1.0: _d_color = "#a0c0d4"
-                        else:               _d_color = "#8a9aac"
-                        _row_l, _row_r = st.columns([10, 1.4])
-                        with _row_l:
-                            st.markdown(
-                                f"<div style='display:flex;align-items:center;gap:16px;"
-                                f"padding:12px 18px;margin-bottom:6px;"
-                                f"background:linear-gradient(165deg,#0e1828,#0a1218);"
-                                f"border-left:3px solid {_d_color};border-radius:6px'>"
-                                f"<div style='font-family:Inter,sans-serif;font-size:18px;"
-                                f"font-weight:800;color:{_d_color};min-width:24px'>#{_rank}</div>"
-                                f"<div style='flex:1'>"
-                                f"<div style='font-family:Inter,sans-serif;font-size:13px;"
-                                f"font-weight:700;color:#c8d8e8;margin-bottom:3px'>{_lbl}</div>"
-                                f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                                f"color:#5a7a90'>{_detail}</div>"
-                                f"</div>"
-                                f"<div style='font-family:Inter,sans-serif;font-size:16px;"
-                                f"font-weight:700;color:{_d_color}'>+{_delta:.1f}</div>"
-                                f"</div>",
-                                unsafe_allow_html=True,
-                            )
-                        with _row_r:
-                            st.markdown("<div style='margin-top:14px'></div>",
-                                         unsafe_allow_html=True)
-                            st.button(
-                                "Apply →",
-                                key=f"_apply_sugg_{_rank}",
-                                on_click=_apply_suggestion,
-                                args=(_action,),
-                                width='stretch',
-                            )
+                    _hm_note_pre = (
+                        "<br><span style='color:#5a7a90'>Heatmaps show predicted Stuff+ "
+                        "by zone (catcher's view; gold = elite, blue = below avg).</span>"
+                    ) if _ZONE_AVAILABLE else ""
                     st.markdown(
                         "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                        "color:#3a5a78;margin-top:10px;padding:0 4px'>"
-                        "Δ = change in arsenal Stuff+. "
-                        "Movement tweaks ±2.5\", velo tweaks ±2/3 mph, release tweaks ±0.25 ft. "
-                        "Click <b style='color:#a0c0d4'>Apply →</b> to update inputs and re-score."
+                        "color:#3a5a78;margin:0 0 14px 0;line-height:1.7;padding:10px 14px;"
+                        "background:#0a1218;border:1px solid #1a2a40;border-radius:6px'>"
+                        f"<b style='color:{_BRAND_GOLD}'>120+</b> elite &nbsp;·&nbsp; "
+                        "<b style='color:#a0c0d4'>105–115</b> above avg &nbsp;·&nbsp; "
+                        "<b style='color:#8a9aac'>95–105</b> avg &nbsp;·&nbsp; "
+                        "<b style='color:#6a7a8a'>&lt;95</b> below avg<br>"
+                        f"Scale: per-pitch-type, mean=100, SD=10. Trained on {_DATA_YEAR_RANGE} Statcast."
+                        + _hm_note_pre + _v6_help +
                         "</div>",
                         unsafe_allow_html=True,
                     )
+    
+                    for group in _c_added:
+                        if group not in _scores:
+                            continue
+                        sp_val  = _scores[group]["stuff_plus"]
+                        imputed = _scores[group]["imputed"]
+                        color   = PITCH_COLORS[group]
+    
+                        if sp_val >= 115:   sp_color = "#d4a848"
+                        elif sp_val >= 105: sp_color = "#a0c0d4"
+                        elif sp_val >= 95:  sp_color = "#8a9aac"
+                        else:               sp_color = "#6a7a8a"
+    
+                        imputed_user = [f for f in imputed if f in
+                                        ("ivb", "hb", "spin_rate", "rel_height",
+                                         "rel_side", "extension")]
+                        imp_str = (f"<span style='font-family:JetBrains Mono,monospace;"
+                                    f"font-size:10px;color:#5a7a90'>"
+                                    f"imputed: {', '.join(imputed_user)}</span>") \
+                                   if imputed_user else \
+                                   ("<span style='font-family:JetBrains Mono,monospace;"
+                                    "font-size:10px;color:#5ac8a040'>all fields provided</span>")
+    
+                        _sd = _scores[group]
+                        _ci_html = ""
+                        if "stuff_plus_p10" in _sd and "stuff_plus_p90" in _sd:
+                            _ci_html = (
+                                f"<span style='font-family:JetBrains Mono,monospace;"
+                                f"font-size:10px;color:#5a7a90;margin-left:8px'>"
+                                f"range {_sd['stuff_plus_p10']}–{_sd['stuff_plus_p90']}</span>"
+                            )
+                        _plat_html = ""
+                        if "stuff_plus_vs_rhb" in _sd and "stuff_plus_vs_lhb" in _sd:
+                            _plat_html = (
+                                f"<div style='font-family:JetBrains Mono,monospace;"
+                                f"font-size:10px;color:#7a9ab0;margin-top:3px'>"
+                                f"vs RHB: <b style='color:#a0c0d4'>{_sd['stuff_plus_vs_rhb']}</b>"
+                                f" &nbsp;·&nbsp; vs LHB: <b style='color:#a0c0d4'>{_sd['stuff_plus_vs_lhb']}</b>"
+                                f"</div>"
+                            )
+                        _nn_html = ""
+                        if "nearest_pitcher" in _sd:
+                            _nn = _sd["nearest_pitcher"]
+                            _nn_html = (
+                                f"<div style='font-family:JetBrains Mono,monospace;"
+                                f"font-size:10px;color:#6a8a9a;margin-top:3px'>"
+                                f"closest MLB shape: <b style='color:#c0d8e8'>"
+                                f"{_nn['name']} ({_nn['year']})</b>"
+                                f"</div>"
+                            )
+                        _ood_html = ""
+                        if "ood_warnings" in _sd and _sd["ood_warnings"]:
+                            _ood_items = []
+                            for w in _sd["ood_warnings"][:3]:
+                                _color = "#d4a848" if w["severity"] == "extreme" else "#c0a878"
+                                _ood_items.append(
+                                    f"<span style='color:{_color}'>"
+                                    f"{w['feat']}={w['value']} (typical: "
+                                    f"{w['range'][0]}–{w['range'][1]})</span>"
+                                )
+                            _ood_html = (
+                                "<div style='font-family:JetBrains Mono,monospace;"
+                                "font-size:10px;color:#c0a878;margin-top:3px;"
+                                "border-top:1px dashed #c4914830;padding-top:4px'>"
+                                "⚠ outside training range: "
+                                + " &nbsp;·&nbsp; ".join(_ood_items)
+                                + "</div>"
+                            )
+    
+                        st.markdown(
+                            f"<div style='display:flex;align-items:center;justify-content:space-between;"
+                            f"padding:14px 20px;margin-bottom:8px;"
+                            f"background:linear-gradient(165deg,#0e1828 0%,#0c1420 100%);"
+                            f"border-left:3px solid {color};border-radius:6px'>"
+                            f"<div style='display:flex;flex-direction:column;gap:4px;flex:1'>"
+                            f"<div style='font-family:Inter,sans-serif;font-size:13px;"
+                            f"font-weight:700;color:{color};letter-spacing:2px;"
+                            f"text-transform:uppercase'>{group}</div>"
+                            f"<div>{imp_str}{_ci_html}</div>"
+                            f"{_plat_html}{_nn_html}{_ood_html}"
+                            f"</div>"
+                            f"<div style='font-family:Inter,sans-serif;font-size:32px;"
+                            f"font-weight:800;color:{sp_color};margin-left:16px'>{sp_val}</div>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+    
+                        # Zone-Stuff+ heatmaps
+                        if _ZONE_AVAILABLE and "shape_row" in _scores[group]:
+                            shape_row = _scores[group]["shape_row"]
+                            zone_grid = _score_zone_grid(shape_row, pitcher_hand=_hcode)
+                            _z_cov_all = (_zone_bundle or {}).get("zone_coverage") or {}
+                            _z_cov = _z_cov_all.get(group) if isinstance(_z_cov_all, dict) else None
+                            if zone_grid:
+                                hm_rhb = _render_zone_heatmap_svg(
+                                    zone_grid["vs_rhb"], "vs RHB", zone_coverage=_z_cov,
+                                )
+                                hm_lhb = _render_zone_heatmap_svg(
+                                    zone_grid["vs_lhb"], "vs LHB", zone_coverage=_z_cov,
+                                )
+                                hm_cols = st.columns([1, 1])
+                                with hm_cols[0]:
+                                    st.markdown(hm_rhb, unsafe_allow_html=True)
+                                with hm_cols[1]:
+                                    st.markdown(hm_lhb, unsafe_allow_html=True)
+                                st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    
+                    # ── Arsenal Grade ─────────────────────────────────────────────
+                    _scored_vals = _C.get("scored_vals", [])
+                    if _scored_vals:
+                        _usage_dict = {
+                            g: _pdict.get(g, {}).get("usage_pct")
+                            for g in _c_added if g in _scores
+                        }
+                        _arsenal_info = _score_arsenal_combined(
+                            {g: _scores[g] for g in _c_added if g in _scores},
+                            usage=_usage_dict,
+                        )
+                        _arsenal_sp     = _arsenal_info.get("arsenal_stuff_plus", 100.0)
+                        _arsenal_sp_rhb = _arsenal_info.get("arsenal_stuff_plus_vs_rhb")
+                        _arsenal_sp_lhb = _arsenal_info.get("arsenal_stuff_plus_vs_lhb")
+                        _grade_subtitle = (
+                            "Usage-weighted raw aggregation, league-standardized"
+                            if _arsenal_info.get("method") == "raw_aggregation"
+                            else "Unweighted avg (no arsenal norms in bundle)"
+                        )
+    
+                        if _arsenal_sp >= 120:   _grade = "A+"
+                        elif _arsenal_sp >= 112: _grade = "A"
+                        elif _arsenal_sp >= 107: _grade = "B+"
+                        elif _arsenal_sp >= 102: _grade = "B"
+                        elif _arsenal_sp >= 97:  _grade = "C+"
+                        elif _arsenal_sp >= 92:  _grade = "C"
+                        else:                    _grade = "D"
+    
+                        if _arsenal_sp >= 107:   _grade_color = _BRAND_GOLD
+                        elif _arsenal_sp >= 97:  _grade_color = "#a0c0d4"
+                        elif _arsenal_sp >= 87:  _grade_color = "#8a9aac"
+                        else:                    _grade_color = "#6a7a8a"
+    
+                        _platoon_html = ""
+                        if _arsenal_sp_rhb is not None and _arsenal_sp_lhb is not None:
+                            _platoon_html = (
+                                "<div style='font-family:JetBrains Mono,monospace;"
+                                "font-size:10px;color:#7a9ab0;margin-top:3px'>"
+                                f"vs RHB: <b style='color:#a0c0d4'>{_arsenal_sp_rhb}</b>"
+                                f" &nbsp;·&nbsp; vs LHB: <b style='color:#a0c0d4'>{_arsenal_sp_lhb}</b>"
+                                "</div>"
+                            )
+                        st.markdown(
+                            "<div style='margin:28px 0 8px 0;padding:18px 24px;"
+                            "background:linear-gradient(165deg,#0e1828,#0a1520);"
+                            "border:1px solid #1a2a40;border-radius:8px;"
+                            "display:flex;align-items:center;justify-content:space-between'>"
+                            "<div>"
+                            "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
+                            f"color:{_BRAND_GOLD};letter-spacing:2px;text-transform:uppercase;"
+                            "margin-bottom:4px'>Arsenal Stuff+</div>"
+                            "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                            f"color:#3a5a78'>{_grade_subtitle}</div>"
+                            f"{_platoon_html}"
+                            "</div>"
+                            "<div style='display:flex;align-items:baseline;gap:14px'>"
+                            f"<div style='font-family:Inter,sans-serif;font-size:36px;"
+                            f"font-weight:800;color:{_grade_color}'>{_arsenal_sp:.1f}</div>"
+                            f"<div style='font-family:Inter,sans-serif;font-size:22px;"
+                            f"font-weight:700;color:{_grade_color};opacity:0.7'>{_grade}</div>"
+                            "</div></div>",
+                            unsafe_allow_html=True,
+                        )
+    
+                    # ── Movement Plot ─────────────────────────────────────────────
+                    st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
+                        "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
+                        "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
+                        "● Movement Profile vs Closest A+ Arsenal</div>",
+                        unsafe_allow_html=True,
+                    )
+                    _cplot = _C.get("plot", {})
+                    if _cplot:
+                        try:
+                            import matplotlib.pyplot as _plt
+                            import matplotlib.patheffects as _pe
+                            from matplotlib.lines import Line2D as _L2D
+    
+                            _user_pts_r   = _cplot["user_pts"]
+                            _match_pts_r  = _cplot["match_pts"]
+                            _aplus_label  = _cplot["aplus_label"]
+                            _added_pitches_r = _cplot["added_pitches"]
+                            _PLT_COLORS_R = _cplot["plt_colors"]
+    
+                            _fig, _ax = _plt.subplots(figsize=(4, 3.2))
+                            _fig.patch.set_facecolor("#0c1420")
+                            _ax.set_facecolor("#0e1828")
+                            for _spine in _ax.spines.values():
+                                _spine.set_edgecolor("#1a2a40")
+                            _ax.tick_params(colors="#5a7a90", labelsize=9)
+                            _ax.set_xlabel("Horizontal Break — arm-side + (in)", color="#5a7a90", fontsize=10)
+                            _ax.set_ylabel("Induced Vertical Break (in)", color="#5a7a90", fontsize=10)
+                            _ax.set_xlim(-25, 25)
+                            _ax.set_ylim(-25, 25)
+                            _ax.axhline(0, color="#1a2a40", lw=1, zorder=0)
+                            _ax.axvline(0, color="#1a2a40", lw=1, zorder=0)
+                            _ax.grid(True, color="#1a2a40", lw=0.5, alpha=0.6, zorder=0)
+    
+                            for _g, (_hb, _ivb) in _match_pts_r.items():
+                                _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
+                                _ax.scatter(_hb, _ivb, s=180, facecolors="none",
+                                            edgecolors=_c, linewidths=2,
+                                            marker="D", alpha=0.7, zorder=3)
+    
+                            _plotted = []
+                            for _g, (_hb, _ivb) in _user_pts_r.items():
+                                _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
+                                _ax.scatter(_hb, _ivb, s=220, color=_c,
+                                            edgecolors="white", linewidths=1.2,
+                                            marker="o", zorder=5, label=_g)
+                                _ax.annotate(_g, (_hb, _ivb),
+                                             textcoords="offset points", xytext=(8, 5),
+                                             fontsize=8, color=_c,
+                                             path_effects=[_pe.withStroke(linewidth=2, foreground="#0e1828")])
+                                _plotted.append(_g)
+    
+                            for _g in _plotted:
+                                if _g in _match_pts_r:
+                                    _ux, _uy = _user_pts_r[_g]
+                                    _mx, _my = _match_pts_r[_g]
+                                    _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
+                                    _ax.plot([_ux, _mx], [_uy, _my],
+                                             color=_c, lw=1, linestyle="--", alpha=0.35, zorder=2)
+    
+                            _legend_elems = [
+                                _L2D([0],[0], marker="o", color="w", markerfacecolor="#aaaaaa",
+                                     markersize=8, label="Your arsenal", linestyle="None"),
+                                _L2D([0],[0], marker="D", color="w", markerfacecolor="none",
+                                     markeredgecolor="#aaaaaa", markersize=8,
+                                     label="A+ target", linestyle="None"),
+                            ]
+                            _ax.legend(handles=_legend_elems, facecolor="#0e1828",
+                                       edgecolor="#1a2a40", labelcolor="#a0c0d4",
+                                       fontsize=7, loc="best")
+                            _plt.tight_layout(pad=1.0)
+                            st.pyplot(_fig, use_container_width=True)
+                            _plt.close(_fig)
+    
+                            _caption = (
+                                f"<b style='color:#a0c0d4'>{_aplus_label}</b> — "
+                                "diamonds show the optimised IVB/HB for your pitch types "
+                                "(same velo &amp; release) that maximises Stuff+."
+                            )
+                            if _added_pitches_r:
+                                _caption += (
+                                    f" Reaching A+ required adding: "
+                                    f"<b style='color:#c49148'>{', '.join(_added_pitches_r)}</b>."
+                                )
+                            st.markdown(
+                                f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                                f"color:#3a5a78;margin-top:6px;padding:0 4px;line-height:1.6'>"
+                                f"{_caption}</div>",
+                                unsafe_allow_html=True,
+                            )
+                        except Exception as _plot_err2:
+                            st.markdown(
+                                f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                                f"color:#5a3a3a;padding:8px'>Movement plot unavailable: {_plot_err2}</div>",
+                                unsafe_allow_html=True,
+                            )
+                    elif _C.get("plot_error"):
+                        st.markdown(
+                            f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                            f"color:#5a3a3a;padding:8px'>Movement plot unavailable: {_C['plot_error']}</div>",
+                            unsafe_allow_html=True,
+                        )
+    
+                    # ── Top 5 Improvement Suggestions ────────────────────────────
+                    st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
+                        "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
+                        "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
+                        "● Top 5 Improvement Suggestions</div>",
+                        unsafe_allow_html=True,
+                    )
+    
+                    def _apply_suggestion(action):
+                        t = action["type"]
+                        if t == "add_pitch":
+                            grp = action["group"]
+                            pitches_list = st.session_state.setdefault("_dmsp_pitches", [])
+                            if grp not in pitches_list:
+                                pitches_list.append(grp)
+                            vals = action.get("values", {})
+                            _SUFFIX = {"velo": "_velo", "ivb": "_ivb",
+                                       "hb": "_hb", "spin_rate": "_spin"}
+                            for _field, _suf in _SUFFIX.items():
+                                if _field in vals and vals[_field] is not None:
+                                    st.session_state[f"dm_{grp}{_suf}"] = f"{vals[_field]}"
+                        elif t == "set_pitch_field":
+                            grp = action["group"]
+                            _suf_map = {"velo": "_velo", "ivb": "_ivb",
+                                        "hb": "_hb", "spin_rate": "_spin",
+                                        "usage": "_usage"}
+                            suf = _suf_map[action["field"]]
+                            st.session_state[f"dm_{grp}{suf}"] = f"{action['value']}"
+                        elif t == "set_release":
+                            st.session_state[action["key"]] = float(action["value"])
+                        elif t == "remove_pitch":
+                            grp = action["group"]
+                            pl = st.session_state.get("_dmsp_pitches", [])
+                            if grp in pl:
+                                pl.remove(grp)
+                            for _suf in ["_velo", "_ivb", "_hb", "_spin", "_usage"]:
+                                st.session_state.pop(f"dm_{grp}{_suf}", None)
+                            st.session_state.pop("_dm_cache", None)
+                        st.session_state["_dm_auto_compute"] = True
+    
+                    _top5 = _C.get("top5", [])
+                    if not _top5:
+                        st.markdown(
+                            "<div style='font-family:JetBrains Mono,monospace;font-size:11px;"
+                            "color:#3a5a78;padding:16px 0'>No tested changes improved the arsenal score.</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        for _rank, (_delta, _lbl, _detail, _action) in enumerate(_top5, 1):
+                            if _delta >= 2.0:   _d_color = _BRAND_GOLD
+                            elif _delta >= 1.0: _d_color = "#a0c0d4"
+                            else:               _d_color = "#8a9aac"
+                            _row_l, _row_r = st.columns([10, 1.4])
+                            with _row_l:
+                                st.markdown(
+                                    f"<div style='display:flex;align-items:center;gap:16px;"
+                                    f"padding:12px 18px;margin-bottom:6px;"
+                                    f"background:linear-gradient(165deg,#0e1828,#0a1218);"
+                                    f"border-left:3px solid {_d_color};border-radius:6px'>"
+                                    f"<div style='font-family:Inter,sans-serif;font-size:18px;"
+                                    f"font-weight:800;color:{_d_color};min-width:24px'>#{_rank}</div>"
+                                    f"<div style='flex:1'>"
+                                    f"<div style='font-family:Inter,sans-serif;font-size:13px;"
+                                    f"font-weight:700;color:#c8d8e8;margin-bottom:3px'>{_lbl}</div>"
+                                    f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                                    f"color:#5a7a90'>{_detail}</div>"
+                                    f"</div>"
+                                    f"<div style='font-family:Inter,sans-serif;font-size:16px;"
+                                    f"font-weight:700;color:{_d_color}'>+{_delta:.1f}</div>"
+                                    f"</div>",
+                                    unsafe_allow_html=True,
+                                )
+                            with _row_r:
+                                st.markdown("<div style='margin-top:14px'></div>",
+                                             unsafe_allow_html=True)
+                                st.button(
+                                    "Apply →",
+                                    key=f"_apply_sugg_{_rank}",
+                                    on_click=_apply_suggestion,
+                                    args=(_action,),
+                                    width='stretch',
+                                )
+                        st.markdown(
+                            "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                            "color:#3a5a78;margin-top:10px;padding:0 4px'>"
+                            "Δ = change in arsenal Stuff+. "
+                            "Movement ±2.5\", velo ±2/3 mph, release ±0.25 ft, usage ±10%, pitch removal also tested. "
+                            "Click <b style='color:#a0c0d4'>Apply →</b> to update inputs and re-score."
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+
+            _dm_results_frag()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
