@@ -5631,9 +5631,26 @@ elif st.session_state.screen == "dmstuff":
                         hand=hand_code,
                     )
                     if scores:
-                        # ── Compute movement data ────────────────────────────
-                        _cache_plot = {}
-                        _plot_error = None
+                        # Store basic cache immediately so results always show,
+                        # even if the expensive movement/suggestion computations fail.
+                        st.session_state["_dm_cache"] = {
+                            "scores":        scores,
+                            "pitches_dict":  pitches_dict,
+                            "hand_code":     hand_code,
+                            "dm_rh":         dm_rh,
+                            "dm_rs":         dm_rs,
+                            "dm_ext":        dm_ext,
+                            "dm_added":      list(dm_added),
+                            "missing_velo":  missing_velo,
+                            "plot":          {},
+                            "plot_error":    None,
+                            "top5":          [],
+                            "baseline_mean": 100.0,
+                            "scored_vals":   [scores[g]["stuff_plus"]
+                                              for g in dm_added if g in scores],
+                        }
+
+                        # ── Compute movement data (updates cache on success) ──
                         try:
                             import matplotlib.pyplot as _plt
                             import matplotlib.patheffects as _pe
@@ -5765,158 +5782,147 @@ elif st.session_state.screen == "dmstuff":
                             if _added_pitches:
                                 _aplus_label += f" (added: {', '.join(_added_pitches)})"
 
-                            _cache_plot = {
-                                "user_pts":       _user_pts,
-                                "match_pts":      _match_pts,
-                                "aplus_label":    _aplus_label,
-                                "added_pitches":  _added_pitches,
-                                "opt_mean":       _opt_mean,
-                                "plt_colors":     _PLT_COLORS,
+                            st.session_state["_dm_cache"]["plot"] = {
+                                "user_pts":      _user_pts,
+                                "match_pts":     _match_pts,
+                                "aplus_label":   _aplus_label,
+                                "added_pitches": _added_pitches,
+                                "opt_mean":      _opt_mean,
+                                "plt_colors":    _PLT_COLORS,
                             }
                         except Exception as _plot_err:
-                            _plot_error = str(_plot_err)
+                            st.session_state["_dm_cache"]["plot_error"] = str(_plot_err)
 
-                        # ── Compute suggestions ──────────────────────────────
-                        _FB_GROUPS_S = {"4-Seam", "2-Seam/Sinker"}
+                        # ── Compute suggestions (updates cache on success) ────
+                        try:
+                            _FB_GROUPS_S = {"4-Seam", "2-Seam/Sinker"}
 
-                        def _rescore_mean(mod_pitches, rh=dm_rh, rs=dm_rs, ext=dm_ext, hand=hand_code):
-                            _s = _score_v5_arsenal(
-                                pitches=mod_pitches,
-                                rel_height=rh, rel_side=rs, extension=ext, hand=hand,
-                            )
-                            if not _s:
-                                return None
-                            _u = {g: mod_pitches.get(g, {}).get("usage_pct")
-                                  for g in mod_pitches if g in _s}
-                            _info = _score_arsenal_combined(
-                                {g: _s[g] for g in mod_pitches if g in _s}, usage=_u,
-                            )
-                            _asp = _info.get("arsenal_stuff_plus")
-                            if _asp is not None:
-                                return float(_asp)
-                            vals = [_s[g]["stuff_plus"] for g in mod_pitches if g in _s]
-                            return sum(vals) / len(vals) if vals else None
+                            def _rescore_mean(mod_pitches, rh=dm_rh, rs=dm_rs, ext=dm_ext, hand=hand_code):
+                                _s = _score_v5_arsenal(
+                                    pitches=mod_pitches,
+                                    rel_height=rh, rel_side=rs, extension=ext, hand=hand,
+                                )
+                                if not _s:
+                                    return None
+                                _u = {g: mod_pitches.get(g, {}).get("usage_pct")
+                                      for g in mod_pitches if g in _s}
+                                _info = _score_arsenal_combined(
+                                    {g: _s[g] for g in mod_pitches if g in _s}, usage=_u,
+                                )
+                                _asp = _info.get("arsenal_stuff_plus")
+                                if _asp is not None:
+                                    return float(_asp)
+                                vals = [_s[g]["stuff_plus"] for g in mod_pitches if g in _s]
+                                return sum(vals) / len(vals) if vals else None
 
-                        _scored_vals_sugg = [scores[g]["stuff_plus"] for g in dm_added if g in scores]
-                        _baseline_arsenal = _rescore_mean(pitches_dict)
-                        _baseline_mean = (_baseline_arsenal if _baseline_arsenal is not None
-                                          else (sum(_scored_vals_sugg) / len(_scored_vals_sugg)
-                                                if _scored_vals_sugg else 100.0))
+                            _scored_vals_sugg = [scores[g]["stuff_plus"] for g in dm_added if g in scores]
+                            _baseline_arsenal = _rescore_mean(pitches_dict)
+                            _baseline_mean = (_baseline_arsenal if _baseline_arsenal is not None
+                                              else (sum(_scored_vals_sugg) / len(_scored_vals_sugg)
+                                                    if _scored_vals_sugg else 100.0))
 
-                        _suggestions = []
+                            _suggestions = []
 
-                        # 1. Add each missing MLB pitch type
-                        _current_pitches = set(pitches_dict.keys())
-                        for _grp, _meds in _MLB_PITCH_MEDIANS.items():
-                            if _grp in _current_pitches:
-                                continue
-                            _try = dict(pitches_dict)
-                            _try[_grp] = dict(_meds)
-                            _new_mean = _rescore_mean(_try)
-                            if _new_mean is not None:
-                                _delta = _new_mean - _baseline_mean
-                                _suggestions.append((
-                                    _delta,
-                                    f"Add MLB-avg {_grp}",
-                                    f"{_meds['velo']:.1f} mph · "
-                                    f"{_meds['ivb']:+.1f}″ iVB · "
-                                    f"{_meds['hb']:+.1f}″ HB",
-                                    {"type": "add_pitch", "group": _grp,
-                                     "values": dict(_meds)},
-                                ))
-
-                        # 2. Movement tweaks per pitch (iVB ±2.5 in, HB ±2.5 in)
-                        for _grp, _pd_s in pitches_dict.items():
-                            _cur_ivb = _pd_s.get("ivb")
-                            _cur_hb  = _pd_s.get("hb")
-                            for _feat, _cur_val, _label_feat in [
-                                ("ivb", _cur_ivb, "iVB"),
-                                ("hb",  _cur_hb,  "HB"),
-                            ]:
-                                for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
-                                    _try = {g: dict(v) for g, v in pitches_dict.items()}
-                                    _new_val = (_cur_val if _cur_val is not None else
-                                                (_V5_MEDIANS["ivb_in"] if _feat == "ivb"
-                                                 else _V5_MEDIANS["hb_arm_in"])) + _sign * 2.5
-                                    _try[_grp][_feat] = _new_val
-                                    _new_mean = _rescore_mean(_try)
-                                    if _new_mean is not None:
-                                        _delta = _new_mean - _baseline_mean
-                                        _suggestions.append((
-                                            _delta,
-                                            f"{_sign_str}2.5″ {_label_feat} on {_grp}",
-                                            f"{_new_val:+.1f}″ {_label_feat}",
-                                            {"type": "set_pitch_field", "group": _grp,
-                                             "field": _feat, "value": round(_new_val, 1)},
-                                        ))
-
-                        # 3. Velo tweaks on offspeed/breaking pitches (±2 mph and ±3 mph)
-                        for _grp, _pd_s in pitches_dict.items():
-                            if _grp in _FB_GROUPS_S:
-                                continue
-                            _cur_v = _pd_s.get("velo", 0)
-                            for _delta_v in [2.0, 3.0]:
-                                for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
-                                    _try = {g: dict(v) for g, v in pitches_dict.items()}
-                                    _new_v = _cur_v + _sign * _delta_v
-                                    _try[_grp]["velo"] = _new_v
-                                    _new_mean = _rescore_mean(_try)
-                                    if _new_mean is not None:
-                                        _delta = _new_mean - _baseline_mean
-                                        _suggestions.append((
-                                            _delta,
-                                            f"{_sign_str}{_delta_v:.0f} mph on {_grp}",
-                                            f"{_new_v:.1f} mph",
-                                            {"type": "set_pitch_field", "group": _grp,
-                                             "field": "velo", "value": round(_new_v, 1)},
-                                        ))
-
-                        # 4. Release profile tweaks
-                        _cur_rh  = dm_rh  if dm_rh  is not None else _V5_MEDIANS["rel_height"]
-                        _cur_rs  = dm_rs  if dm_rs  is not None else abs(_V5_MEDIANS["rel_side_arm"])
-                        _cur_ext = dm_ext if dm_ext is not None else _V5_MEDIANS["extension"]
-                        for _param, _cur, _lo, _hi, _label, _rh_arg, _rs_arg, _ext_arg, _ss_key in [
-                            ("rh",  _cur_rh,  3.0, 8.0, "Rel Height", None,    _cur_rs, _cur_ext, "dm_rh"),
-                            ("rs",  _cur_rs,  0.0, 5.0, "Rel Side",   _cur_rh, None,    _cur_ext, "dm_rs"),
-                            ("ext", _cur_ext, 4.0, 8.0, "Extension",  _cur_rh, _cur_rs, None,     "dm_ext"),
-                        ]:
-                            for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
-                                _new_val = _cur + _sign * 0.25
-                                if not (_lo <= _new_val <= _hi):
+                            # 1. Add each missing MLB pitch type
+                            _current_pitches = set(pitches_dict.keys())
+                            for _grp, _meds in _MLB_PITCH_MEDIANS.items():
+                                if _grp in _current_pitches:
                                     continue
-                                _rh_use  = _new_val if _param == "rh"  else _rh_arg
-                                _rs_use  = _new_val if _param == "rs"  else _rs_arg
-                                _ext_use = _new_val if _param == "ext" else _ext_arg
-                                _new_mean = _rescore_mean(pitches_dict, rh=_rh_use, rs=_rs_use, ext=_ext_use)
+                                _try = dict(pitches_dict)
+                                _try[_grp] = dict(_meds)
+                                _new_mean = _rescore_mean(_try)
                                 if _new_mean is not None:
                                     _delta = _new_mean - _baseline_mean
                                     _suggestions.append((
                                         _delta,
-                                        f"{_sign_str}0.25 ft {_label}",
-                                        f"{_new_val:.2f} ft",
-                                        {"type": "set_release", "key": _ss_key,
-                                         "value": round(_new_val, 2)},
+                                        f"Add MLB-avg {_grp}",
+                                        f"{_meds['velo']:.1f} mph · "
+                                        f"{_meds['ivb']:+.1f}″ iVB · "
+                                        f"{_meds['hb']:+.1f}″ HB",
+                                        {"type": "add_pitch", "group": _grp,
+                                         "values": dict(_meds)},
                                     ))
 
-                        _suggestions.sort(key=lambda x: -x[0])
-                        _top5 = [s for s in _suggestions if s[0] > 0.05][:5]
+                            # 2. Movement tweaks per pitch (iVB ±2.5 in, HB ±2.5 in)
+                            for _grp, _pd_s in pitches_dict.items():
+                                _cur_ivb = _pd_s.get("ivb")
+                                _cur_hb  = _pd_s.get("hb")
+                                for _feat, _cur_val, _label_feat in [
+                                    ("ivb", _cur_ivb, "iVB"),
+                                    ("hb",  _cur_hb,  "HB"),
+                                ]:
+                                    for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
+                                        _try = {g: dict(v) for g, v in pitches_dict.items()}
+                                        _new_val = (_cur_val if _cur_val is not None else
+                                                    (_V5_MEDIANS["ivb_in"] if _feat == "ivb"
+                                                     else _V5_MEDIANS["hb_arm_in"])) + _sign * 2.5
+                                        _try[_grp][_feat] = _new_val
+                                        _new_mean = _rescore_mean(_try)
+                                        if _new_mean is not None:
+                                            _delta = _new_mean - _baseline_mean
+                                            _suggestions.append((
+                                                _delta,
+                                                f"{_sign_str}2.5″ {_label_feat} on {_grp}",
+                                                f"{_new_val:+.1f}″ {_label_feat}",
+                                                {"type": "set_pitch_field", "group": _grp,
+                                                 "field": _feat, "value": round(_new_val, 1)},
+                                            ))
 
-                        # ── Store everything to cache ────────────────────────
-                        st.session_state["_dm_cache"] = {
-                            "scores":       scores,
-                            "pitches_dict": pitches_dict,
-                            "hand_code":    hand_code,
-                            "dm_rh":        dm_rh,
-                            "dm_rs":        dm_rs,
-                            "dm_ext":       dm_ext,
-                            "dm_added":     list(dm_added),
-                            "missing_velo": missing_velo,
-                            "plot":         _cache_plot,
-                            "plot_error":   _plot_error,
-                            "top5":         _top5,
-                            "baseline_mean": _baseline_mean,
-                            "scored_vals":  [scores[g]["stuff_plus"] for g in dm_added if g in scores],
-                        }
+                            # 3. Velo tweaks on offspeed/breaking pitches (±2 mph and ±3 mph)
+                            for _grp, _pd_s in pitches_dict.items():
+                                if _grp in _FB_GROUPS_S:
+                                    continue
+                                _cur_v = _pd_s.get("velo", 0)
+                                for _delta_v in [2.0, 3.0]:
+                                    for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
+                                        _try = {g: dict(v) for g, v in pitches_dict.items()}
+                                        _new_v = _cur_v + _sign * _delta_v
+                                        _try[_grp]["velo"] = _new_v
+                                        _new_mean = _rescore_mean(_try)
+                                        if _new_mean is not None:
+                                            _delta = _new_mean - _baseline_mean
+                                            _suggestions.append((
+                                                _delta,
+                                                f"{_sign_str}{_delta_v:.0f} mph on {_grp}",
+                                                f"{_new_v:.1f} mph",
+                                                {"type": "set_pitch_field", "group": _grp,
+                                                 "field": "velo", "value": round(_new_v, 1)},
+                                            ))
+
+                            # 4. Release profile tweaks
+                            _cur_rh  = dm_rh  if dm_rh  is not None else _V5_MEDIANS["rel_height"]
+                            _cur_rs  = dm_rs  if dm_rs  is not None else abs(_V5_MEDIANS["rel_side_arm"])
+                            _cur_ext = dm_ext if dm_ext is not None else _V5_MEDIANS["extension"]
+                            for _param, _cur, _lo, _hi, _label, _rh_arg, _rs_arg, _ext_arg, _ss_key in [
+                                ("rh",  _cur_rh,  3.0, 8.0, "Rel Height", None,    _cur_rs, _cur_ext, "dm_rh"),
+                                ("rs",  _cur_rs,  0.0, 5.0, "Rel Side",   _cur_rh, None,    _cur_ext, "dm_rs"),
+                                ("ext", _cur_ext, 4.0, 8.0, "Extension",  _cur_rh, _cur_rs, None,     "dm_ext"),
+                            ]:
+                                for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
+                                    _new_val = _cur + _sign * 0.25
+                                    if not (_lo <= _new_val <= _hi):
+                                        continue
+                                    _rh_use  = _new_val if _param == "rh"  else _rh_arg
+                                    _rs_use  = _new_val if _param == "rs"  else _rs_arg
+                                    _ext_use = _new_val if _param == "ext" else _ext_arg
+                                    _new_mean = _rescore_mean(pitches_dict, rh=_rh_use, rs=_rs_use, ext=_ext_use)
+                                    if _new_mean is not None:
+                                        _delta = _new_mean - _baseline_mean
+                                        _suggestions.append((
+                                            _delta,
+                                            f"{_sign_str}0.25 ft {_label}",
+                                            f"{_new_val:.2f} ft",
+                                            {"type": "set_release", "key": _ss_key,
+                                             "value": round(_new_val, 2)},
+                                        ))
+
+                            _suggestions.sort(key=lambda x: -x[0])
+                            st.session_state["_dm_cache"]["top5"] = [
+                                s for s in _suggestions if s[0] > 0.05
+                            ][:5]
+                            st.session_state["_dm_cache"]["baseline_mean"] = _baseline_mean
+                        except Exception:
+                            pass  # suggestions failed; top5 stays empty
 
             # ── Render from cache (persists across reruns, no flashing) ──────
             if "_dm_cache" in st.session_state:
