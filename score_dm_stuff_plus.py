@@ -48,11 +48,22 @@ def _load(model_dir="models"):
     global _BUNDLE, _FEATURES, _CAT_FEATURES, _GROUP_TO_INT, _NORMS
     global _PER_TYPE_SCALERS, _FALLBACK_SCALER, _VAA_HAA_BASELINES
     global _ARSENAL_CELL_STATS, _KMEANS_STATE
-    # Prefer v6 bundle when available; fall back to v5e
-    p_v6 = Path(model_dir) / "dm_stuff_plus_v6.joblib"
-    p_v5 = Path(model_dir) / "dm_stuff_plus_v5.joblib"
-    p = p_v6 if p_v6.exists() else p_v5
-    norms_filename = (f"dm_stuff_plus_{'v6' if p_v6.exists() else 'v5'}_norms.json")
+    # Prefer highest-version bundle; fall back through v8c → v8b → v8 → v6 → v5
+    candidates = [
+        ("v8c", Path(model_dir) / "dm_stuff_plus_v8c.joblib"),
+        ("v8b", Path(model_dir) / "dm_stuff_plus_v8b.joblib"),
+        ("v8",  Path(model_dir) / "dm_stuff_plus_v8.joblib"),
+        ("v6",  Path(model_dir) / "dm_stuff_plus_v6.joblib"),
+        ("v5",  Path(model_dir) / "dm_stuff_plus_v5.joblib"),
+    ]
+    p = None; tag = None
+    for t, c in candidates:
+        if c.exists():
+            p = c; tag = t
+            break
+    if p is None:
+        print("DM Stuff+ load failed: no bundle file found")
+        return False
     try:
         b = joblib.load(p)
         _BUNDLE       = b
@@ -63,17 +74,29 @@ def _load(model_dir="models"):
         _PER_TYPE_SCALERS = b.get("per_type_scalers", {})
         _VAA_HAA_BASELINES = b.get("vaa_haa_baselines", {})
         _ARSENAL_CELL_STATS = b.get("arsenal_cell_stats")
-        _KMEANS_STATE = b.get("kmeans_state")  # v6++: None if v5 bundle
-        _FALLBACK_SCALER  = b.get("fallback_scaler") or b.get("scaler")
+        # v8+ uses bb_kmeans_state + fb_kmeans_state; v6 uses kmeans_state
+        _KMEANS_STATE = (b.get("bb_kmeans_state")  # v8+ breaking ball k-means
+                        or b.get("kmeans_state"))  # v6 fallback (singular)
 
-        norms_override = Path(model_dir) / norms_filename
-        if norms_override.exists():
-            try:
-                _NORMS = json.loads(norms_override.read_text())
-                print(f"DM Stuff+ {b.get('version','?')}: using recalibrated norms from {norms_override.name}")
-            except Exception as e:
-                print(f"DM Stuff+ {b.get('version','?')}: norms override failed ({e}); using bundle norms")
-        print(f"DM Stuff+ loaded: {b.get('version','?')} from {p.name}")
+        # Only apply norms override if it matches the bundle version
+        version_str = b.get("version", "")
+        norms_filename = None
+        if "v8" in version_str:
+            norms_filename = "dm_stuff_plus_v8_norms.json"  # only if exists
+        elif "v6" in version_str:
+            norms_filename = "dm_stuff_plus_v6_norms.json"
+        elif "v5" in version_str:
+            norms_filename = "dm_stuff_plus_v5_norms.json"
+        if norms_filename:
+            norms_override = Path(model_dir) / norms_filename
+            if norms_override.exists():
+                try:
+                    _NORMS = json.loads(norms_override.read_text())
+                    print(f"DM Stuff+ {version_str}: using norms override {norms_filename}")
+                except Exception as e:
+                    print(f"DM Stuff+ {version_str}: norms override failed ({e}); using bundle norms")
+        _FALLBACK_SCALER  = b.get("fallback_scaler") or b.get("scaler")
+        print(f"DM Stuff+ loaded: {version_str} from {p.name}")
         return True
     except Exception as e:
         print(f"DM Stuff+ load failed: {e}")
@@ -485,6 +508,34 @@ def score_dm_stuff_plus_batch(df_pitches, model_dir="models", recalibrate=True):
     df["vaa_aa"] = vaa_aa_arr
     df["haa_aa"] = haa_aa_arr
 
+    # v8c: compute velo_diff/ivb_diff/hb_diff from primary FB if not supplied.
+    # build_profiles supplies these directly, but standalone callers may not.
+    if "velo_diff" not in df.columns or df["velo_diff"].isna().all():
+        _FB_PRIORITY_GRPS = ["4-Seam", "2-Seam/Sinker", "Cutter"]
+        # Per (pitcher OR player_name, year), find primary FB and compute diff
+        _id_col = "pitcher" if "pitcher" in df.columns and df["pitcher"].notna().any() else "player_name"
+        if _id_col in df.columns and "year" in df.columns:
+            primary_lookup = {}
+            for fb in _FB_PRIORITY_GRPS:
+                fb_rows = df[df["pitch_group"] == fb]
+                if len(fb_rows) > 0:
+                    agg = fb_rows.groupby([_id_col, "year"]).agg(
+                        primary_velo=("start_speed", "mean"),
+                        primary_ivb=("ivb_in", "mean"),
+                        primary_hb=("hb_arm_in", "mean"),
+                    )
+                    for k, v in agg.iterrows():
+                        if k not in primary_lookup:
+                            primary_lookup[k] = v
+            df["_primary_velo"] = df.apply(
+                lambda r: primary_lookup.get((r[_id_col], r["year"]), {}).get("primary_velo", r["start_speed"]),
+                axis=1
+            )
+            df["velo_diff"] = df["start_speed"] - df["_primary_velo"]
+            df = df.drop(columns=["_primary_velo"])
+        else:
+            df["velo_diff"] = 0.0
+
     # v5c interaction (replaces v4's vaa_x_velo)
     df["vaa_aa_x_velo"]      = df["vaa_aa"] * df["start_speed"]
     df["rel_height_x_velo"]  = df["rel_height"] * df["start_speed"]
@@ -498,46 +549,73 @@ def score_dm_stuff_plus_batch(df_pitches, model_dir="models", recalibrate=True):
     df["active_spin_rate"] = df["spin_rate"].fillna(MEDIANS["active_spin_rate"]) * (1.0 - ssw_frac)
     df["rel_quadrant"]     = df["rel_height"] * df["rel_side_arm"]
 
-    # v6++ features: spin_axis_sin/cos, bauer_units, sweeper_cluster_score.
-    # These are only required if the bundle's feature list includes them.
-    _needs_v6 = any(f in (_FEATURES or []) for f in
-                      ("spin_axis_sin", "spin_axis_cos", "bauer_units",
-                       "sweeper_cluster_score"))
-    if _needs_v6:
-        # spin_axis decomposition (use spin_axis column if present, else default)
+    # v6++/v8 features (computed conditionally on what the bundle expects)
+    _bundle_feats = set(_FEATURES or [])
+
+    # spin axis decomposition
+    if any(f in _bundle_feats for f in ("spin_axis_sin", "spin_axis_cos")):
         if "spin_axis" in df.columns:
             axis_rad = np.radians(df["spin_axis"].fillna(180.0))
         else:
             axis_rad = np.full(len(df), np.radians(180.0))
         df["spin_axis_sin"] = np.sin(axis_rad)
         df["spin_axis_cos"] = np.cos(axis_rad)
-        # Bauer Units
+
+    # Bauer Units
+    if "bauer_units" in _bundle_feats:
         df["bauer_units"] = (df["spin_rate"].fillna(2300.0)
                               / df["start_speed"].clip(lower=60.0))
-        # Sweeper cluster score: NaN for non-breaking-balls, compute via kmeans for breaking
-        df["sweeper_cluster_score"] = np.nan
-        if _KMEANS_STATE is not None:
-            slider_int  = _GROUP_TO_INT.get("Slider", -1)
-            sweeper_int = _GROUP_TO_INT.get("Sweeper", -1)
-            br_mask = df["pitch_type_int"].isin([slider_int, sweeper_int])
-            if br_mask.any():
-                try:
-                    cf = _KMEANS_STATE["cluster_feats"]
-                    means_d = _KMEANS_STATE["feature_means"]
-                    stds_d  = _KMEANS_STATE["feature_stds"]
-                    sub = df.loc[br_mask, cf].copy()
-                    sub_z = (sub - pd.Series(means_d)) / pd.Series(stds_d).clip(lower=1e-6)
-                    sub_z = sub_z.fillna(0)
-                    centroids = _KMEANS_STATE["centroids"]
-                    diffs = sub_z.values[:, None, :] - centroids[None, :, :]
-                    dists = np.sqrt((diffs ** 2).sum(axis=-1))
-                    neg_d2 = -(dists ** 2)
-                    shifted = neg_d2 - neg_d2.max(axis=1, keepdims=True)
-                    probs = np.exp(shifted)
-                    probs = probs / probs.sum(axis=1, keepdims=True)
-                    df.loc[br_mask, "sweeper_cluster_score"] = probs[:, _KMEANS_STATE["sweeper_cluster"]]
-                except Exception as e:
-                    print(f"  ! sweeper_cluster_score compute failed ({e}); leaving NaN")
+
+    # Cluster scores: training data hard-coded 1.0/0.0 for Statcast-tagged
+    # pitches. At inference (where pitch_group is known from the input), use
+    # hard 0/1 values rather than softmax probabilities — softmax distribution
+    # is wildly off from training distribution and blows up scaling.
+    slider_int  = _GROUP_TO_INT.get("Slider", -1)
+    sweeper_int = _GROUP_TO_INT.get("Sweeper", -1)
+    fourSeam_int = _GROUP_TO_INT.get("4-Seam", -1)
+    sinker_int  = _GROUP_TO_INT.get("2-Seam/Sinker", -1)
+    if "sweeper_cluster_score" in _bundle_feats:
+        df["sweeper_cluster_score"] = np.where(
+            df["pitch_type_int"] == sweeper_int, 1.0,
+            np.where(df["pitch_type_int"] == slider_int, 0.0, np.nan)
+        )
+    if "four_seam_cluster_score" in _bundle_feats:
+        df["four_seam_cluster_score"] = np.where(
+            df["pitch_type_int"] == fourSeam_int, 1.0,
+            np.where(df["pitch_type_int"] == sinker_int, 0.0, np.nan)
+        )
+
+    # v8c physics features
+    if "arm_angle" in _bundle_feats:
+        _vert = df["rel_height"] - 5.0
+        _horiz = df["rel_side_arm"].abs().clip(lower=0.01)
+        df["arm_angle"] = np.degrees(np.arctan2(_vert, _horiz))
+    if "velo_x_typeint" in _bundle_feats:
+        df["velo_x_typeint"] = df["start_speed"] * df["pitch_type_int"]
+    if "rel_quadrant_x_velo" in _bundle_feats:
+        df["rel_quadrant_x_velo"] = df["rel_quadrant"] * df["start_speed"]
+    if "rel_quadrant_x_typeint" in _bundle_feats:
+        df["rel_quadrant_x_typeint"] = df["rel_quadrant"] * df["pitch_type_int"]
+    if "perceived_velo" in _bundle_feats:
+        df["perceived_velo"] = df["start_speed"] * (1.0 + (df["extension"] - 6.5) / 55.0)
+    if "velo_x_spin_rate" in _bundle_feats:
+        df["velo_x_spin_rate"] = df["start_speed"] * df["spin_rate"].fillna(2300.0)
+    if "velo_x_ivb" in _bundle_feats:
+        df["velo_x_ivb"] = df["start_speed"] * df["ivb_in"]
+    if "movement_angle_sin" in _bundle_feats or "movement_angle_cos" in _bundle_feats:
+        _tm = np.sqrt(df["ivb_in"]**2 + df["hb_arm_in"]**2).clip(lower=0.01)
+        df["movement_angle_sin"] = df["ivb_in"] / _tm
+        df["movement_angle_cos"] = df["hb_arm_in"] / _tm
+        df["total_movement"] = _tm
+    elif "total_movement" in _bundle_feats:
+        df["total_movement"] = np.sqrt(df["ivb_in"]**2 + df["hb_arm_in"]**2)
+    if "ivb_per_spin" in _bundle_feats:
+        _safe_spin = df["spin_rate"].fillna(2300.0).clip(lower=100.0)
+        df["ivb_per_spin"] = df["ivb_in"] / _safe_spin * 1000.0
+        df["hb_per_spin"]  = df["hb_arm_in"] / _safe_spin * 1000.0
+    if "active_spin_pct" in _bundle_feats:
+        _safe_spin = df["spin_rate"].fillna(2300.0).clip(lower=100.0)
+        df["active_spin_pct"] = (df["active_spin_rate"] / _safe_spin).clip(lower=0.0, upper=1.0)
 
     # v5d: compute arsenal-context features.
     # The batch path can receive either:
@@ -551,6 +629,9 @@ def score_dm_stuff_plus_batch(df_pitches, model_dir="models", recalibrate=True):
         "arsenal_ivb_max_other", "arsenal_ivb_min_other",
         "arsenal_hb_max_other", "arsenal_hb_min_other",
         "nearest_other_velo_diff", "nearest_other_ivb_diff", "nearest_other_hb_diff",
+        # v8c additions: arsenal-context features that need multi-pitch context
+        "release_pt_arsenal_spread_h", "release_pt_arsenal_spread_v",
+        "movement_arc_to_primary", "perceived_velo_diff_primary",
     ]
     # Pick the grouping key based on what's available in df.
     # Priority: numeric pitcher_id > player_name. Year is required.
@@ -571,24 +652,60 @@ def score_dm_stuff_plus_batch(df_pitches, model_dir="models", recalibrate=True):
                 df[f] = np.nan
     if needs_arsenal and _group_id_col is not None and _have_shape and _have_year:
         # Group by (pitcher OR player_name, year) and fill arsenal context
+        _FB_PRIORITY_INTS = [_GROUP_TO_INT.get(g, -1) for g in
+                              ["4-Seam", "2-Seam/Sinker", "Cutter"]]
         for (_, _), grp_df in df.groupby([_group_id_col, "year"], sort=False):
             if len(grp_df) < 2:
-                # Single-pitch arsenal: arsenal_size = 1, rest stay NaN
                 df.loc[grp_df.index, "arsenal_size"] = 1.0
                 continue
             arsenal = [
-                (int(r["pitch_type_int"]), r["start_speed"], r["ivb_in"], r["hb_arm_in"])
+                (int(r["pitch_type_int"]), r["start_speed"], r["ivb_in"], r["hb_arm_in"],
+                 r.get("rel_height", np.nan), r.get("rel_side_arm", np.nan),
+                 r.get("extension", np.nan))
                 for _, r in grp_df.iterrows() if pd.notna(r["pitch_type_int"])
             ]
+            # v8c: arsenal-wide release-point spread
+            _rh_arr = np.array([a[4] for a in arsenal if not np.isnan(a[4])])
+            _rs_arr = np.array([a[5] for a in arsenal if not np.isnan(a[5])])
+            _spread_v = float(np.std(_rh_arr, ddof=0)) if len(_rh_arr) > 1 else 0.0
+            _spread_h = float(np.std(_rs_arr, ddof=0)) if len(_rs_arr) > 1 else 0.0
+            # v8c: identify the primary FB for this pitcher-year
+            primary = None
+            for _fb in _FB_PRIORITY_INTS:
+                for a in arsenal:
+                    if a[0] == _fb:
+                        primary = a   # use first FB in priority order
+                        break
+                if primary is not None:
+                    break
+            if primary is None:
+                # No FB tagged — use fastest pitch as proxy
+                primary = max(arsenal, key=lambda a: a[1])
+
             for idx, row in grp_df.iterrows():
                 this_pt = int(row["pitch_type_int"]) if pd.notna(row["pitch_type_int"]) else -1
-                others = [(p, v, iv, h) for (p, v, iv, h) in arsenal if p != this_pt]
+                others = [a for a in arsenal if a[0] != this_pt]
                 df.at[idx, "arsenal_size"] = float(len(arsenal))
+                if "release_pt_arsenal_spread_h" in _bundle_feats:
+                    df.at[idx, "release_pt_arsenal_spread_h"] = _spread_h
+                if "release_pt_arsenal_spread_v" in _bundle_feats:
+                    df.at[idx, "release_pt_arsenal_spread_v"] = _spread_v
+                # v8c: movement_arc_to_primary
+                if "movement_arc_to_primary" in _bundle_feats:
+                    _ivb_d = row["ivb_in"]    - primary[2]
+                    _hb_d  = row["hb_arm_in"] - primary[3]
+                    df.at[idx, "movement_arc_to_primary"] = float(np.sqrt(_ivb_d**2 + _hb_d**2))
+                # v8c: perceived_velo_diff_primary
+                if "perceived_velo_diff_primary" in _bundle_feats:
+                    _ext_row = row.get("extension", 6.4)
+                    _my_perc = row["start_speed"] * (1.0 + (_ext_row - 6.5) / 55.0)
+                    _pr_perc = primary[1] * (1.0 + (_ext_row - 6.5) / 55.0)
+                    df.at[idx, "perceived_velo_diff_primary"] = float(_my_perc - _pr_perc)
                 if not others:
                     continue
-                other_v = np.array([v for (_, v, _, _) in others])
-                other_i = np.array([iv for (_, _, iv, _) in others])
-                other_h = np.array([h for (_, _, _, h) in others])
+                other_v = np.array([a[1] for a in others])
+                other_i = np.array([a[2] for a in others])
+                other_h = np.array([a[3] for a in others])
                 df.at[idx, "arsenal_ivb_spread"]    = float(other_i.max() - other_i.min())
                 df.at[idx, "arsenal_hb_spread"]     = float(other_h.max() - other_h.min())
                 df.at[idx, "arsenal_ivb_max_other"] = float(other_i.max())
@@ -608,9 +725,9 @@ def score_dm_stuff_plus_batch(df_pitches, model_dir="models", recalibrate=True):
                 df.at[idx, "nearest_other_hb_diff"]   = float(row["hb_arm_in"] - other_h[j])
 
     needed = list(_FEATURES)
-    # v5d: arsenal-context features are allowed to be NaN — LightGBM handles natively
-    # v6++: sweeper_cluster_score is NaN for non-breaking-balls by design
-    _arsenal_set = set(_ARSENAL_FEATS) | {"sweeper_cluster_score"}
+    # v5d: arsenal-context features are allowed to be NaN
+    # v6++/v8: cluster scores are NaN for non-matching pitch types
+    _arsenal_set = set(_ARSENAL_FEATS) | {"sweeper_cluster_score", "four_seam_cluster_score"}
     core_needed = [f for f in needed if f not in _arsenal_set]
     valid_mask = df["pitch_type_int"].notna() & df[core_needed].notna().all(axis=1)
     if not valid_mask.any():

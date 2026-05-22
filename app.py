@@ -755,7 +755,9 @@ _V5_NORMS_PATH  = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_
 _V6_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v6.joblib")
 _V7_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v7.joblib")
 
-_V8_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v8.joblib")
+_V8_BUNDLE_PATH  = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v8.joblib")
+_V8B_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v8b.joblib")
+_V8C_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "dm_stuff_plus_v8c.joblib")
 
 
 def _is_bundle_valid(bundle):
@@ -787,10 +789,12 @@ def load_dm_v5():
     each one's norms. Skips any bundle with placeholder norms (mean=0, sd=1).
     """
     candidates = [
-        ("v8", _V8_BUNDLE_PATH),
-        ("v7", _V7_BUNDLE_PATH),
-        ("v6", _V6_BUNDLE_PATH),
-        ("v5", _V5_BUNDLE_PATH),
+        ("v8c", _V8C_BUNDLE_PATH),
+        ("v8b", _V8B_BUNDLE_PATH),
+        ("v8",  _V8_BUNDLE_PATH),
+        ("v7",  _V7_BUNDLE_PATH),
+        ("v6",  _V6_BUNDLE_PATH),
+        ("v5",  _V5_BUNDLE_PATH),
     ]
     for tag, path in candidates:
         if not _os.path.exists(path):
@@ -805,11 +809,16 @@ def load_dm_v5():
             print(f"  ! {tag} at {path} REJECTED — {why}")
             continue
         norms = bundle.get("norms", {})
-        if _os.path.exists(_V5_NORMS_PATH):
+        # Only apply norms override file if it matches the loaded bundle version.
+        # Different versions have wildly different norm scales (e.g., v5 sd~0.004
+        # vs v8c sd~0.38), so mixing them produces wrong Stuff+ values.
+        version = bundle.get("version", "")
+        if "v5" in version and _os.path.exists(_V5_NORMS_PATH):
             try:
                 import json as _json
                 with open(_V5_NORMS_PATH) as _f:
                     norms = _json.load(_f)
+                print(f"  ✓ Applied v5 norms override")
             except Exception:
                 pass
         print(f"  ✓ Loaded Stuff+ bundle: {path} (version={bundle.get('version','?')})")
@@ -1096,7 +1105,50 @@ _ARSENAL_DEFAULT_FEATS = [
     "arsenal_ivb_max_other", "arsenal_ivb_min_other",
     "arsenal_hb_max_other", "arsenal_hb_min_other",
     "nearest_other_velo_diff", "nearest_other_ivb_diff", "nearest_other_hb_diff",
+    # v8c: also fill these for single-pitch arsenals — they have no
+    # natural value when there's only one pitch.
+    "release_pt_arsenal_spread_h", "release_pt_arsenal_spread_v",
+    "movement_arc_to_primary",
+    "perceived_velo_diff_primary",
 ]
+
+
+def _compute_runtime_arsenal_defaults_from_scalers():
+    """v8c fix: if the bundle doesn't ship pre-computed arsenal_defaults,
+    derive per-pitch-type median values from the bundle's RobustScaler
+    `center_` attribute. RobustScaler.center_ stores the training median
+    per feature, so using these for single-pitch arsenals produces ~0
+    scaled values (= league baseline) instead of huge outliers.
+    Returns dict {pitch_type_int: {feat_name: median_value}}.
+    """
+    if not _V5_AVAILABLE or _v5_bundle is None:
+        return {}
+    FEATURES_ALL = _v5_bundle.get("features", [])
+    CAT = _v5_bundle.get("cat_features", [])
+    cont_feats = [f for f in FEATURES_ALL if f not in CAT]
+    per_type = _v5_bundle.get("per_type_scalers", {}) or {}
+    defaults = {}
+    for pt_int, scaler in per_type.items():
+        try:
+            centers = list(scaler.center_)
+            defaults[int(pt_int)] = {
+                cont_feats[i]: float(centers[i]) for i in range(len(cont_feats))
+            }
+        except Exception:
+            continue
+    # Global fallback from fallback_scaler
+    try:
+        fb_scaler = _v5_bundle.get("fallback_scaler") or _v5_bundle.get("scaler")
+        if fb_scaler is not None:
+            defaults["__global__"] = {
+                cont_feats[i]: float(fb_scaler.center_[i]) for i in range(len(cont_feats))
+            }
+    except Exception:
+        pass
+    return defaults
+
+
+_RUNTIME_ARSENAL_DEFAULTS = _compute_runtime_arsenal_defaults_from_scalers() if _V5_AVAILABLE else {}
 
 
 def _release_height_bucket(rh):
@@ -1420,28 +1472,85 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
             row["spin_axis_cos"] = -1.0
         # v6++ #4 Bauer Units (spin/velo). Universal feature.
         row["bauer_units"] = float(spin_rate / max(velo, 60.0))
-        # v6++ #7 K-means soft cluster score: apply trained kmeans if available
-        km_state = _v5_bundle.get("kmeans_state") if _V5_AVAILABLE else None
-        if km_state and pt_int in (
-            _v5_bundle["group_to_int"].get("Slider", -1),
-            _v5_bundle["group_to_int"].get("Sweeper", -1),
-        ):
+
+        # ─── v8c calculator-derivable physics features ────────────────────
+        # arm_angle in degrees (0 = sidearm, 45 = 3/4, 80+ = over-top)
+        _vert = rh - 5.0
+        _horiz = max(abs(rs_arm), 0.01)
+        row["arm_angle"] = float(_np.degrees(_np.arctan2(_vert, _horiz)))
+        # Interactions
+        row["velo_x_typeint"]         = float(velo * pt_int)
+        row["rel_quadrant_x_velo"]    = float(rel_quadrant * velo)
+        row["rel_quadrant_x_typeint"] = float(rel_quadrant * pt_int)
+        # Perceived velocity (extension-adjusted)
+        row["perceived_velo"] = float(velo * (1.0 + (ext - 6.5) / 55.0))
+        # Raw products
+        row["velo_x_spin_rate"] = float(velo * spin_rate)
+        row["velo_x_ivb"]       = float(velo * ivb)
+        # vaa_aa_x_velo (uses already-residualized vaa_aa)
+        row["vaa_aa_x_velo"] = float(vaa_aa * velo)
+        # Movement angle as unit vector (v8c: replaces movement_angle_deg)
+        _total_mv = max(_np.sqrt(ivb**2 + hb_arm**2), 0.01)
+        row["movement_angle_sin"] = float(ivb / _total_mv)
+        row["movement_angle_cos"] = float(hb_arm / _total_mv)
+        row["total_movement"]     = float(_total_mv)
+        # Per-spin efficiency metrics
+        _safe_spin = max(spin_rate, 100.0)
+        row["ivb_per_spin"]    = float(ivb / _safe_spin * 1000.0)
+        row["hb_per_spin"]     = float(hb_arm / _safe_spin * 1000.0)
+        row["active_spin_pct"] = float(min(max(active_spin / _safe_spin, 0.0), 1.0))
+
+        # ─── K-means soft cluster scores (v6++/v8c) ───────────────────────
+        # v8+ bundles use bb_kmeans_state + fb_kmeans_state (split by FB vs BB).
+        # v6/v7 bundles use a single kmeans_state for Slider/Sweeper.
+        bb_km = _v5_bundle.get("bb_kmeans_state") or _v5_bundle.get("kmeans_state") if _V5_AVAILABLE else None
+        fb_km = _v5_bundle.get("fb_kmeans_state") if _V5_AVAILABLE else None
+
+        def _soft_cluster_score(km_state, target_cluster_key, row_dict):
+            """Compute softmax over -d² from input row to k-means centroids,
+            return probability of the named cluster."""
             try:
                 cf = km_state["cluster_feats"]
                 means = km_state["feature_means"]; stds = km_state["feature_stds"]
                 vec = _np.array([
-                    (row.get(c, 0.0) - means[c]) / max(stds[c], 1e-6) for c in cf
+                    (row_dict.get(c, 0.0) - means[c]) / max(stds[c], 1e-6) for c in cf
                 ]).reshape(1, -1)
                 centroids = km_state["centroids"]
                 dists = _np.sqrt(((vec - centroids) ** 2).sum(axis=1))
                 neg_d2 = -(dists ** 2)
                 shifted = neg_d2 - neg_d2.max()
                 probs = _np.exp(shifted); probs = probs / probs.sum()
-                row["sweeper_cluster_score"] = float(probs[km_state["sweeper_cluster"]])
+                return float(probs[km_state[target_cluster_key]])
             except Exception:
-                row["sweeper_cluster_score"] = float("nan")
+                return float("nan")
+
+        _slider_int = _v5_bundle["group_to_int"].get("Slider", -1)
+        _sweeper_int = _v5_bundle["group_to_int"].get("Sweeper", -1)
+        _4seam_int = _v5_bundle["group_to_int"].get("4-Seam", -1)
+        _sinker_int = _v5_bundle["group_to_int"].get("2-Seam/Sinker", -1)
+
+        # Cluster scores: training data hard-coded 1.0 for Statcast-tagged
+        # pitches (~95%+ of rows), so the per-type scaler was fit on values
+        # near 1.0/0.0. At inference we trust the user's pitch-type label
+        # and assign hard values (matching the training-data convention),
+        # NOT softmax probabilities — softmax values like 0.5 are ~28 SDs
+        # below the training median and produce wildly wrong scores.
+        # sweeper_cluster_score: 1.0 for Sweepers, 0.0 for Sliders, NaN for others
+        if pt_int == _sweeper_int:
+            row["sweeper_cluster_score"] = 1.0
+        elif pt_int == _slider_int:
+            row["sweeper_cluster_score"] = 0.0
         else:
             row["sweeper_cluster_score"] = float("nan")
+
+        # four_seam_cluster_score: 1.0 for 4-Seam, 0.0 for Sinker, NaN for others
+        if pt_int == _4seam_int:
+            row["four_seam_cluster_score"] = 1.0
+        elif pt_int == _sinker_int:
+            row["four_seam_cluster_score"] = 0.0
+        else:
+            row["four_seam_cluster_score"] = float("nan")
+
         rows.append(row)
         # Use the scored group (post-reclassification) for the norms lookup,
         # but keep the user-facing key as what they entered so the result
@@ -1496,17 +1605,57 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
             for f in _ARSENAL_DEFAULT_FEATS:
                 if f in defaults:
                     r[f] = float(defaults[f])
-            # Mark as imputed in the per-pitch metadata
             for grp in imputed_per_pitch:
                 imputed_per_pitch[grp].append("arsenal (MLB avg)")
         else:
-            # No defaults available (v6/v7 bundles) — fill with safe 0s to prevent NaN blowup
-            r["arsenal_size"] = 1.0
+            # v8c fix: use runtime defaults derived from per-type scaler
+            # medians instead of zeros. Zeros are wildly off from training
+            # medians for features like arsenal_ivb_max_other (which is
+            # typically ~14 for 4-Seam pitchers) → 0 produces huge negative
+            # z-scores that blow up predictions.
+            pt_int_for_default = int(r["pitch_type_int"])
+            type_defaults = _RUNTIME_ARSENAL_DEFAULTS.get(pt_int_for_default,
+                            _RUNTIME_ARSENAL_DEFAULTS.get("__global__", {}))
             for f in _ARSENAL_DEFAULT_FEATS:
-                if f != "arsenal_size":
+                if f in type_defaults:
+                    r[f] = float(type_defaults[f])
+                elif f == "arsenal_size":
+                    r[f] = 1.0
+                else:
                     r[f] = 0.0
+            for grp in imputed_per_pitch:
+                imputed_per_pitch[grp].append("arsenal (training median)")
 
-    df = _pd.DataFrame(rows)[FEATURES]
+    # ─── v8c arsenal-context features (computed after all rows built) ────
+    # Only compute these from arsenal context when there are MULTIPLE pitches.
+    # For single-pitch arsenals, leave whatever the defaults block set
+    # (training medians) — computing them as 0.0 would clobber realistic
+    # defaults and produce wildly off-distribution scaled values.
+    if len(rows) >= 2:
+        _rh_arr = _np.array([r["rel_height"]   for r in rows], dtype=float)
+        _rs_arr = _np.array([r["rel_side_arm"] for r in rows], dtype=float)
+        _spread_h = float(_np.std(_rs_arr, ddof=0))
+        _spread_v = float(_np.std(_rh_arr, ddof=0))
+        for r in rows:
+            _ivb_d = r["ivb_in"]    - (primary_ivb if primary_ivb is not None else _V5_MEDIANS["ivb_in"])
+            _hb_d  = r["hb_arm_in"] - (primary_hb  if primary_hb  is not None else _V5_MEDIANS["hb_arm_in"])
+            r["movement_arc_to_primary"] = float(_np.sqrt(_ivb_d**2 + _hb_d**2))
+            _primary_perceived = (primary_velo if primary_velo is not None else _V5_MEDIANS["start_speed"]) \
+                                  * (1.0 + (r["extension"] - 6.5) / 55.0)
+            r["perceived_velo_diff_primary"] = float(r["perceived_velo"] - _primary_perceived)
+            r["release_pt_arsenal_spread_h"] = _spread_h
+            r["release_pt_arsenal_spread_v"] = _spread_v
+    # else: single-pitch case — these features were set to runtime medians
+    # in the defaults block above (lines ~1606-1622)
+
+    # Defensive: fill any FEATURES still missing with NaN before slice.
+    # Protects against future bundle versions adding features the app
+    # doesn't know about — LightGBM handles NaN natively for those.
+    df = _pd.DataFrame(rows)
+    for f in FEATURES:
+        if f not in df.columns:
+            df[f] = float("nan")
+    df = df[FEATURES]
     pt_arr = df["pitch_type_int"].to_numpy()
 
     # Per-type scaling
@@ -1569,6 +1718,9 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
         sp = 100.0 + ((raw[i] - m_) / max(s_, 1e-6)) * 10.0
         result = {
             "stuff_plus": round(float(sp), 1),
+            "raw_pred":   float(raw[i]),          # v8c: raw needed for arsenal aggregation
+            "raw_vs_rhb": float(raw_vs_rhb[i]) if raw_vs_rhb is not None else None,
+            "raw_vs_lhb": float(raw_vs_lhb[i]) if raw_vs_lhb is not None else None,
             "imputed":    imputed_per_pitch.get(display_grp, []),
             "shape_row":  rows[i],
         }
@@ -1648,6 +1800,106 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
                 pass
         out[display_grp] = result
     return out
+
+
+# ── Arsenal Stuff+ aggregation (raw-prediction approach) ─────────────────
+# MLB-typical usage% per pitch type (fallback when user doesn't enter usage).
+_MLB_USAGE_FALLBACK = {
+    "4-Seam": 35.0, "2-Seam/Sinker": 18.0, "Cutter": 8.0,
+    "Slider": 16.0, "Sweeper": 6.0, "Curveball": 9.0,
+    "Splitter": 3.0, "Changeup": 5.0, "Knuckleball": 0.1,
+}
+
+
+def _score_arsenal_combined(scores: dict, usage: dict = None) -> dict:
+    """Compute Arsenal Stuff+ via raw-prediction aggregation.
+
+    Y_arsenal = sum(raw_pred_i × usage_i)   (usage weights normalized to 1)
+    Stuff+    = 100 + (Y_arsenal - μ_arsenal) / σ_arsenal × 10
+
+    Where μ_arsenal, σ_arsenal are league-wide pitcher-season anchors
+    stored in bundle["norms"]["arsenal"] (computed by compute_arsenal_norms.py).
+
+    Parameters
+    ----------
+    scores : dict from _score_v5_arsenal — must contain "raw_pred",
+             "raw_vs_rhb", "raw_vs_lhb" per pitch
+    usage  : dict {pitch_group: usage_pct} (optional — uses MLB fallback)
+
+    Returns
+    -------
+    dict with:
+      arsenal_stuff_plus       — headline (vs LHB default for RHP)
+      arsenal_stuff_plus_vs_rhb
+      arsenal_stuff_plus_vs_lhb
+      pitch_contributions      — per-pitch {usage_pct, raw, contribution_to_Y}
+      method                   — "raw_aggregation" or "fallback_avg"
+    """
+    if not scores:
+        return {}
+
+    # Get arsenal norms from the loaded bundle
+    arsenal_norms = ((_v5_bundle or {}).get("norms", {}).get("arsenal") if _V5_AVAILABLE else None)
+    if not arsenal_norms or "mean" not in arsenal_norms or "sd" not in arsenal_norms:
+        # Bundle predates arsenal_norms — fall back to simple average
+        sp_vals = [s["stuff_plus"] for s in scores.values() if "stuff_plus" in s]
+        avg = sum(sp_vals) / len(sp_vals) if sp_vals else 100.0
+        return {
+            "arsenal_stuff_plus": round(avg, 1),
+            "arsenal_stuff_plus_vs_rhb": None,
+            "arsenal_stuff_plus_vs_lhb": None,
+            "pitch_contributions": {},
+            "method": "fallback_avg",
+            "note": "bundle missing norms.arsenal — run compute_arsenal_norms.py",
+        }
+
+    mu = float(arsenal_norms["mean"])
+    sd = max(float(arsenal_norms["sd"]), 1e-6)
+
+    # Resolve usage % per pitch (fallback to MLB-typical median if blank)
+    usage = usage or {}
+    weights = {}
+    for grp in scores.keys():
+        u = usage.get(grp)
+        if u is None or (isinstance(u, float) and (u != u)):  # NaN or missing
+            u = _MLB_USAGE_FALLBACK.get(grp, 5.0)
+        weights[grp] = max(float(u), 0.01)
+    w_sum = sum(weights.values())
+    norm_weights = {g: w / w_sum for g, w in weights.items()}
+
+    # Compute Y_arsenal for each platoon
+    def _aggregate(raw_key: str):
+        Y = 0.0
+        contribs = {}
+        for grp, data in scores.items():
+            raw = data.get(raw_key)
+            if raw is None:
+                continue
+            w = norm_weights[grp]
+            contrib = raw * w
+            Y += contrib
+            contribs[grp] = {"usage_pct": weights[grp], "raw": raw,
+                             "contribution_to_Y": contrib}
+        sp = 100.0 + (Y - mu) / sd * 10.0
+        return round(sp, 1), Y, contribs
+
+    sp_default, Y_default, contribs = _aggregate("raw_pred")
+    sp_rhb = sp_lhb = None
+    if all(scores[g].get("raw_vs_rhb") is not None for g in scores):
+        sp_rhb, _, _ = _aggregate("raw_vs_rhb")
+    if all(scores[g].get("raw_vs_lhb") is not None for g in scores):
+        sp_lhb, _, _ = _aggregate("raw_vs_lhb")
+
+    return {
+        "arsenal_stuff_plus":         sp_default,
+        "arsenal_stuff_plus_vs_rhb":  sp_rhb,
+        "arsenal_stuff_plus_vs_lhb":  sp_lhb,
+        "pitch_contributions":        contribs,
+        "method":                     "raw_aggregation",
+        "Y_arsenal":                  round(Y_default, 4),
+        "norms_used":                 {"mean": mu, "sd": sd},
+        "weights":                    norm_weights,
+    }
 
 
 # ── Zone-conditional Stuff+ scorer ────────────────────────────────────────
@@ -5562,30 +5814,27 @@ elif st.session_state.screen == "dmstuff":
                         _scored_vals = [scores[g]["stuff_plus"] for g in dm_added if g in scores]
                         if _scored_vals:
                             # Usage-weighted if any usage % entered; fall back to
-                            # unweighted average otherwise. MLB-median usage rates
-                            # are used as fallback for pitches with blank usage.
-                            _MLB_USAGE_FALLBACK = {
-                                "4-Seam": 13.5, "2-Seam/Sinker": 31.8, "Cutter": 13.4,
-                                "Slider": 8.8, "Sweeper": 8.2, "Curveball": 15.0,
-                                "Splitter": 3.6, "Changeup": 5.6, "Knuckleball": 0.5,
-                            }
-                            _any_usage = any(
-                                pitches_dict.get(g, {}).get("usage_pct") is not None
+                            # v8c+: Arsenal Stuff+ via raw-prediction aggregation.
+                            # Sum of (raw_pred × usage) standardized against league-wide
+                            # arsenal distribution (bundle["norms"]["arsenal"]).
+                            # Provides intuitive "total run-prevention" interpretation
+                            # rather than mean-of-standardized-percentiles.
+                            _usage_dict = {
+                                g: pitches_dict.get(g, {}).get("usage_pct")
                                 for g in dm_added if g in scores
+                            }
+                            _arsenal_info = _score_arsenal_combined(
+                                {g: scores[g] for g in dm_added if g in scores},
+                                usage=_usage_dict,
                             )
-                            if _any_usage:
-                                _weights = []
-                                for g in dm_added:
-                                    if g not in scores: continue
-                                    u = pitches_dict.get(g, {}).get("usage_pct")
-                                    _weights.append(float(u) if u is not None
-                                                    else _MLB_USAGE_FALLBACK.get(g, 5.0))
-                                _w_sum = sum(_weights) or 1.0
-                                _arsenal_sp = sum(s * w for s, w in zip(_scored_vals, _weights)) / _w_sum
-                                _grade_subtitle = "Usage-weighted across entered pitches"
-                            else:
-                                _arsenal_sp = sum(_scored_vals) / len(_scored_vals)
-                                _grade_subtitle = "Unweighted avg (enter Usage % to weight)"
+                            _arsenal_sp = _arsenal_info.get("arsenal_stuff_plus", 100.0)
+                            _arsenal_sp_rhb = _arsenal_info.get("arsenal_stuff_plus_vs_rhb")
+                            _arsenal_sp_lhb = _arsenal_info.get("arsenal_stuff_plus_vs_lhb")
+                            _grade_subtitle = (
+                                "Usage-weighted raw aggregation, league-standardized"
+                                if _arsenal_info.get("method") == "raw_aggregation"
+                                else "Unweighted avg (no arsenal norms in bundle)"
+                            )
 
                             if _arsenal_sp >= 120:   _grade = "A+"
                             elif _arsenal_sp >= 112: _grade = "A"
@@ -5600,6 +5849,15 @@ elif st.session_state.screen == "dmstuff":
                             elif _arsenal_sp >= 87:  _grade_color = "#8a9aac"
                             else:                    _grade_color = "#6a7a8a"
 
+                            _platoon_html = ""
+                            if _arsenal_sp_rhb is not None and _arsenal_sp_lhb is not None:
+                                _platoon_html = (
+                                    "<div style='font-family:JetBrains Mono,monospace;"
+                                    "font-size:10px;color:#7a9ab0;margin-top:3px'>"
+                                    f"vs RHB: <b style='color:#a0c0d4'>{_arsenal_sp_rhb}</b>"
+                                    f" &nbsp;·&nbsp; vs LHB: <b style='color:#a0c0d4'>{_arsenal_sp_lhb}</b>"
+                                    "</div>"
+                                )
                             st.markdown(
                                 "<div style='margin:28px 0 8px 0;padding:18px 24px;"
                                 "background:linear-gradient(165deg,#0e1828,#0a1520);"
@@ -5611,6 +5869,7 @@ elif st.session_state.screen == "dmstuff":
                                 "margin-bottom:4px'>Arsenal Stuff+</div>"
                                 "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
                                 f"color:#3a5a78'>{_grade_subtitle}</div>"
+                                f"{_platoon_html}"
                                 "</div>"
                                 "<div style='display:flex;align-items:baseline;gap:14px'>"
                                 f"<div style='font-family:Inter,sans-serif;font-size:36px;"
