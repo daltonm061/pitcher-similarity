@@ -1,0 +1,133 @@
+{
+  "version": "usage_outcome_v3b",
+  "trained_at": "2026-05-23 17:34:49",
+  "n_pitches": 6189966,
+  "per_stand": {
+    "R": {
+      "fit_random_arsenal": {
+        "n": 13986,
+        "r2": 0.3464904343833646,
+        "rmse": 0.06039589431776155
+      },
+      "tunnel_lambda": 0.0367173630906023,
+      "fit_with_tunnel": {
+        "n": 13986,
+        "r2": 0.348962729061584,
+        "rmse": 0.060281544089666794
+      },
+      "pitcher_disjoint": {
+        "r2_mean": 0.27228739950981073,
+        "rmse_mean": 0.06373256381695172,
+        "n_arsenals": 13986,
+        "fold_metrics": [
+          {
+            "fold": 0,
+            "n_test_pitchers": 529
+          },
+          {
+            "fold": 1,
+            "n_test_pitchers": 529
+          },
+          {
+            "fold": 2,
+            "n_test_pitchers": 529
+          },
+          {
+            "fold": 3,
+            "n_test_pitchers": 528
+          },
+          {
+            "fold": 4,
+            "n_test_pitchers": 528
+          }
+        ]
+      },
+      "temporal_holdout": {
+        "n_train": 2766274,
+        "n_val": 420463,
+        "n_test": 413668,
+        "n_test_arsenals": 1586,
+        "test_r2": 0.254379311603371,
+        "test_rmse": 0.06359826790149571
+      },
+      "within_pitcher_delta": {
+        "n_pairs_yoy": 5376,
+        "corr_yoy": 0.37193077312356404,
+        "sign_agreement_yoy": 0.6220238095238095,
+        "n_pairs_mom": 8013,
+        "corr_mom": 0.2886130928926863,
+        "sign_agreement_mom": 0.589417197054786
+      },
+      "counterfactual": {
+        "n_samples_used": 200,
+        "n_high_bumps": 56,
+        "n_low_bumps": 83,
+        "pct_high_bumps_increased_pred": 1.0,
+        "pct_low_bumps_decreased_pred": 1.0
+      }
+    },
+    "L": {
+      "fit_random_arsenal": {
+        "n": 8086,
+        "r2": 0.3559117897644154,
+        "rmse": 0.05864851741591442
+      },
+      "tunnel_lambda": 0.02089962432381519,
+      "fit_with_tunnel": {
+        "n": 8086,
+        "r2": 0.3569306477227727,
+        "rmse": 0.05860211215860321
+      },
+      "pitcher_disjoint": {
+        "r2_mean": 0.2691009209919023,
+        "rmse_mean": 0.062475979034097406,
+        "n_arsenals": 8086,
+        "fold_metrics": [
+          {
+            "fold": 0,
+            "n_test_pitchers": 520
+          },
+          {
+            "fold": 1,
+            "n_test_pitchers": 520
+          },
+          {
+            "fold": 2,
+            "n_test_pitchers": 520
+          },
+          {
+            "fold": 3,
+            "n_test_pitchers": 520
+          },
+          {
+            "fold": 4,
+            "n_test_pitchers": 519
+          }
+        ]
+      },
+      "temporal_holdout": {
+        "n_train": 1939907,
+        "n_val": 317348,
+        "n_test": 332306,
+        "n_test_arsenals": 1083,
+        "test_r2": 0.290091962522219,
+        "test_rmse": 0.06315073703995949
+      },
+      "within_pitcher_delta": {
+        "n_pairs_yoy": 2903,
+        "corr_yoy": 0.40052413941642534,
+        "sign_agreement_yoy": 0.6231484671029969,
+        "n_pairs_mom": 4387,
+        "corr_mom": 0.2907769793979046,
+        "sign_agreement_mom": 0.5999544107590609
+      },
+      "counterfactual": {
+        "n_samples_used": 200,
+        "n_high_bumps": 88,
+        "n_low_bumps": 129,
+        "pct_high_bumps_increased_pred": 1.0,
+        "pct_low_bumps_decreased_pred": 1.0
+      }
+    }
+  }
+}
