@@ -1709,14 +1709,6 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
         except Exception:
             raw_vs_rhb = raw_vs_lhb = None
 
-    # Overall raw = average of both platoon scores so the headline Stuff+ and
-    # raw_pred (used for arsenal aggregation) reflect a true overall number
-    # rather than only the opposite-hand score (is_same_hand=0 default).
-    if raw_vs_rhb is not None and raw_vs_lhb is not None:
-        raw_overall = (raw_vs_rhb + raw_vs_lhb) / 2.0
-    else:
-        raw_overall = raw  # fallback if platoon scores unavailable
-
     # OOD ranges + NN reference from bundle
     ood_ranges = _v5_bundle.get("ood_ranges", {}) or {}
     nn_ref     = _v5_bundle.get("nn_reference")    # pandas DataFrame or None
@@ -1728,10 +1720,12 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
     for i, (display_grp, scored_grp) in enumerate(keys):
         params = by_type.get(scored_grp, overall)
         m_, s_ = params["mean"], params["sd"]
-        sp = 100.0 + ((raw_overall[i] - m_) / max(s_, 1e-6)) * 10.0
+        # Keep raw[i] (is_same_hand=0) as the normed score — arsenal norms were
+        # calibrated against this distribution, so raw_pred must stay unchanged.
+        sp = 100.0 + ((raw[i] - m_) / max(s_, 1e-6)) * 10.0
         result = {
             "stuff_plus": round(float(sp), 1),
-            "raw_pred":   float(raw_overall[i]),   # overall avg used for arsenal aggregation
+            "raw_pred":   float(raw[i]),           # keep original for arsenal norms
             "raw_vs_rhb": float(raw_vs_rhb[i]) if raw_vs_rhb is not None else None,
             "raw_vs_lhb": float(raw_vs_lhb[i]) if raw_vs_lhb is not None else None,
             "imputed":    imputed_per_pitch.get(display_grp, []),
@@ -1744,12 +1738,15 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
             # Clamp ordering (q10 should be <= q90, but quantile crossing happens)
             result["stuff_plus_p10"] = round(float(min(sp_lo, sp_hi)), 1)
             result["stuff_plus_p90"] = round(float(max(sp_lo, sp_hi)), 1)
-        # #4 Platoon split
+        # #4 Platoon split — also compute averaged overall for display
         if raw_vs_rhb is not None:
             sp_rhb = 100.0 + ((raw_vs_rhb[i] - m_) / max(s_, 1e-6)) * 10.0
             sp_lhb = 100.0 + ((raw_vs_lhb[i] - m_) / max(s_, 1e-6)) * 10.0
             result["stuff_plus_vs_rhb"] = round(float(sp_rhb), 1)
             result["stuff_plus_vs_lhb"] = round(float(sp_lhb), 1)
+            # Overall = simple average of both sides; displayed instead of the
+            # opposite-hand-only default so the headline reflects a true overall.
+            result["stuff_plus_overall"] = round((sp_rhb + sp_lhb) / 2.0, 1)
         # #3 OOD warning: flag features outside training 5th/95th percentile
         ranges_for_pt = ood_ranges.get(scored_grp, {})
         if ranges_for_pt:
@@ -6117,7 +6114,11 @@ elif st.session_state.screen == "dmstuff":
                     for group in _c_added:
                         if group not in _scores:
                             continue
-                        sp_val  = _scores[group]["stuff_plus"]
+                        # Use overall (avg vs RHB + vs LHB) when available;
+                        # fall back to opposite-hand default if platoon not scored.
+                        sp_val  = _scores[group].get(
+                            "stuff_plus_overall", _scores[group]["stuff_plus"]
+                        )
                         imputed = _scores[group]["imputed"]
                         color   = PITCH_COLORS[group]
     
@@ -6231,9 +6232,16 @@ elif st.session_state.screen == "dmstuff":
                             {g: _scores[g] for g in _c_added if g in _scores},
                             usage=_usage_dict,
                         )
-                        _arsenal_sp     = _arsenal_info.get("arsenal_stuff_plus", 100.0)
                         _arsenal_sp_rhb = _arsenal_info.get("arsenal_stuff_plus_vs_rhb")
                         _arsenal_sp_lhb = _arsenal_info.get("arsenal_stuff_plus_vs_lhb")
+                        # Show true overall (avg vs RHB + vs LHB) when both platoon
+                        # scores are available; fall back to opposite-hand default.
+                        if _arsenal_sp_rhb is not None and _arsenal_sp_lhb is not None:
+                            _arsenal_sp = round(
+                                (_arsenal_sp_rhb + _arsenal_sp_lhb) / 2.0, 1
+                            )
+                        else:
+                            _arsenal_sp = _arsenal_info.get("arsenal_stuff_plus", 100.0)
                         _grade_subtitle = (
                             "Usage-weighted raw aggregation, league-standardized"
                             if _arsenal_info.get("method") == "raw_aggregation"
