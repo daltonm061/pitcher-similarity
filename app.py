@@ -1709,6 +1709,14 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
         except Exception:
             raw_vs_rhb = raw_vs_lhb = None
 
+    # Overall raw = average of both platoon scores so the headline Stuff+ and
+    # raw_pred (used for arsenal aggregation) reflect a true overall number
+    # rather than only the opposite-hand score (is_same_hand=0 default).
+    if raw_vs_rhb is not None and raw_vs_lhb is not None:
+        raw_overall = (raw_vs_rhb + raw_vs_lhb) / 2.0
+    else:
+        raw_overall = raw  # fallback if platoon scores unavailable
+
     # OOD ranges + NN reference from bundle
     ood_ranges = _v5_bundle.get("ood_ranges", {}) or {}
     nn_ref     = _v5_bundle.get("nn_reference")    # pandas DataFrame or None
@@ -1720,10 +1728,10 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
     for i, (display_grp, scored_grp) in enumerate(keys):
         params = by_type.get(scored_grp, overall)
         m_, s_ = params["mean"], params["sd"]
-        sp = 100.0 + ((raw[i] - m_) / max(s_, 1e-6)) * 10.0
+        sp = 100.0 + ((raw_overall[i] - m_) / max(s_, 1e-6)) * 10.0
         result = {
             "stuff_plus": round(float(sp), 1),
-            "raw_pred":   float(raw[i]),          # v8c: raw needed for arsenal aggregation
+            "raw_pred":   float(raw_overall[i]),   # overall avg used for arsenal aggregation
             "raw_vs_rhb": float(raw_vs_rhb[i]) if raw_vs_rhb is not None else None,
             "raw_vs_lhb": float(raw_vs_lhb[i]) if raw_vs_lhb is not None else None,
             "imputed":    imputed_per_pitch.get(display_grp, []),
@@ -5627,6 +5635,34 @@ elif st.session_state.screen == "dmstuff":
                             "usage_pct": _pf(st.session_state.get(f"dm_{group}_usage")),
                         }
 
+                    # ── LHP catcher's-view HB detection ──────────────────────
+                    # Model expects arm-side-positive (positive = arm-side regardless of
+                    # hand). Trackman/Rapsodo reports LHP pitches in catcher's view, so
+                    # coaches pull LHP arm-side pitches with NEGATIVE HB. Detect this and
+                    # flip all HBs back to arm-side-positive before scoring.
+                    hb_auto_flipped = False
+                    if hand_code == "L":
+                        # Expected sign in arm-side-positive convention
+                        _LHP_SIGN_EXPECTED = {
+                            "4-Seam": +1, "2-Seam/Sinker": +1,
+                            "Splitter": +1, "Changeup": +1,
+                            "Slider": -1, "Sweeper": -1,
+                        }
+                        _hb_wrong = _hb_total = 0
+                        for _g_check, _pd_check in pitches_dict.items():
+                            _hb_check = _pd_check.get("hb")
+                            _exp_sign = _LHP_SIGN_EXPECTED.get(_g_check)
+                            if _hb_check is None or _exp_sign is None or _hb_check == 0:
+                                continue
+                            _hb_total += 1
+                            if (1 if _hb_check > 0 else -1) != _exp_sign:
+                                _hb_wrong += 1
+                        if _hb_total > 0 and _hb_wrong > _hb_total / 2:
+                            for _g_flip in pitches_dict:
+                                if pitches_dict[_g_flip].get("hb") is not None:
+                                    pitches_dict[_g_flip]["hb"] = -pitches_dict[_g_flip]["hb"]
+                            hb_auto_flipped = True
+
                     if pitches_dict:
                         with st.spinner("Scoring pitches…"):
                             scores = _score_v5_arsenal(
@@ -5638,20 +5674,21 @@ elif st.session_state.screen == "dmstuff":
                             )
                         if scores:
                             st.session_state["_dm_cache"] = {
-                                "scores":        scores,
-                                "pitches_dict":  pitches_dict,
-                                "hand_code":     hand_code,
-                                "dm_rh":         _dm_rh,
-                                "dm_rs":         _dm_rs,
-                                "dm_ext":        _dm_ext,
-                                "dm_added":      list(_dm_added),
-                                "missing_velo":  missing_velo,
-                                "plot":          {},
-                                "plot_error":    None,
-                                "top5":          [],
-                                "baseline_mean": 100.0,
-                                "scored_vals":   [scores[g]["stuff_plus"]
-                                                  for g in _dm_added if g in scores],
+                                "scores":          scores,
+                                "pitches_dict":    pitches_dict,
+                                "hand_code":       hand_code,
+                                "dm_rh":           _dm_rh,
+                                "dm_rs":           _dm_rs,
+                                "dm_ext":          _dm_ext,
+                                "dm_added":        list(_dm_added),
+                                "missing_velo":    missing_velo,
+                                "hb_auto_flipped": hb_auto_flipped,
+                                "plot":            {},
+                                "plot_error":      None,
+                                "top5":            [],
+                                "baseline_mean":   100.0,
+                                "scored_vals":     [scores[g]["stuff_plus"]
+                                                    for g in _dm_added if g in scores],
                             }
 
                             # ── Movement (5×5 coarse + 5×5 fine = 50 calls/pitch) ──
@@ -5667,6 +5704,9 @@ elif st.session_state.screen == "dmstuff":
                                     "Knuckleball": "#adb5bd",
                                 }
 
+                                # Collect user pts in arm-side-positive convention.
+                                # pitches_dict["hb"] is already arm-side-positive.
+                                # hb_arm_in in shape_row is glove-side-positive → negate.
                                 _user_pts = {}
                                 for _g in _dm_added:
                                     if _g not in scores:
@@ -5674,7 +5714,9 @@ elif st.session_state.screen == "dmstuff":
                                     _sr = scores[_g].get("shape_row", {})
                                     _hb_val  = pitches_dict[_g].get("hb")  if _g in pitches_dict else None
                                     _ivb_val = pitches_dict[_g].get("ivb") if _g in pitches_dict else None
-                                    if _hb_val  is None: _hb_val  = _sr.get("hb_arm_in")
+                                    if _hb_val is None:
+                                        _hb_arm_in = _sr.get("hb_arm_in")
+                                        _hb_val = (-_hb_arm_in) if _hb_arm_in is not None else None
                                     if _ivb_val is None: _ivb_val = _sr.get("ivb_in")
                                     if _hb_val is not None and _ivb_val is not None:
                                         _user_pts[_g] = (float(_hb_val), float(_ivb_val))
@@ -5716,7 +5758,8 @@ elif st.session_state.screen == "dmstuff":
                                     _velo_m = _pd_m.get("velo", 90)
                                     _spin_m = _pd_m.get("spin_rate")
                                     _cur_ivb_m = _pd_m.get("ivb") or _V5_MEDIANS["ivb_in"]
-                                    _cur_hb_m  = _pd_m.get("hb")  or _V5_MEDIANS["hb_arm_in"]
+                                    # hb_arm_in median is glove-side-pos; negate to get arm-side-pos
+                                    _cur_hb_m  = _pd_m.get("hb") or (-_V5_MEDIANS["hb_arm_in"])
                                     _iv_lo = max(_bd["ivb"][0], _cur_ivb_m - max_delta)
                                     _iv_hi = min(_bd["ivb"][1], _cur_ivb_m + max_delta)
                                     _hb_lo = max(_bd["hb"][0],  _cur_hb_m  - max_delta)
@@ -5925,13 +5968,13 @@ elif st.session_state.screen == "dmstuff":
                                                      "value": round(_new_val, 2)},
                                                 ))
 
-                                    # 5. Usage ±10 percentage points
+                                    # 5. Usage ±20 percentage points
                                     for _grp, _pd_s in pitches_dict.items():
                                         _cur_usage = _pd_s.get("usage_pct")
                                         if _cur_usage is None:
                                             continue
                                         for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
-                                            _new_usage = _cur_usage + _sign * 10.0
+                                            _new_usage = _cur_usage + _sign * 20.0
                                             if _new_usage < 0 or _new_usage > 100:
                                                 continue
                                             _try_d = {g: dict(v) for g, v in pitches_dict.items()}
@@ -5941,26 +5984,32 @@ elif st.session_state.screen == "dmstuff":
                                                 _delta = _new_mean - _baseline_mean
                                                 _suggestions.append((
                                                     _delta,
-                                                    f"{_sign_str}10% usage on {_grp}",
+                                                    f"{_sign_str}20% usage on {_grp}",
                                                     f"{_new_usage:.0f}% usage",
                                                     {"type": "set_pitch_field", "group": _grp,
                                                      "field": "usage", "value": round(_new_usage, 1)},
                                                 ))
 
-                                    # 6. Remove each pitch
-                                    if len(pitches_dict) > 1:
+                                    # 6. Remove each pitch — only when result keeps ≥ 2 pitches.
+                                    # Going from 2→1 pitch changes arsenal-context scoring
+                                    # (single-pitch uses MLB-average context), which can
+                                    # produce misleadingly large positive deltas.
+                                    if len(pitches_dict) > 2:
                                         for _grp in list(pitches_dict.keys()):
                                             _try_d = {g: dict(v) for g, v in pitches_dict.items()
                                                       if g != _grp}
                                             _new_mean = _rescore_mean(_try_d)
                                             if _new_mean is not None:
                                                 _delta = _new_mean - _baseline_mean
-                                                _suggestions.append((
-                                                    _delta,
-                                                    f"Remove {_grp}",
-                                                    f"{len(pitches_dict) - 1}-pitch arsenal",
-                                                    {"type": "remove_pitch", "group": _grp},
-                                                ))
+                                                # Apply a higher bar for removal suggestions
+                                                # to avoid noise from arsenal-context shifts
+                                                if _delta > 1.0:
+                                                    _suggestions.append((
+                                                        _delta,
+                                                        f"Remove {_grp}",
+                                                        f"{len(pitches_dict) - 1}-pitch arsenal",
+                                                        {"type": "remove_pitch", "group": _grp},
+                                                    ))
 
                                 _suggestions.sort(key=lambda x: -x[0])
                                 st.session_state["_dm_cache"]["top5"] = [
@@ -5992,6 +6041,20 @@ elif st.session_state.screen == "dmstuff":
                             f"font-family:JetBrains Mono,monospace;font-size:11px;color:#c0a878'>"
                             f"⚠ Missing velocity for: {', '.join(_C['missing_velo'])} — these pitches were skipped."
                             f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    if _C.get("hb_auto_flipped"):
+                        st.markdown(
+                            "<div style='max-width:680px;margin:8px auto 16px auto;"
+                            "padding:10px 16px;border:1px solid #2a4a6a40;"
+                            "border-radius:6px;background:#0a1420;"
+                            "font-family:JetBrains Mono,monospace;font-size:10px;color:#5a8aaa'>"
+                            "ℹ HB signs auto-converted: entered values looked like catcher's-view "
+                            "(Trackman) format where LHP arm-side is negative. Flipped to "
+                            "arm-side-positive for the model. Plot shows catcher's view (LHP "
+                            "arm-side appears on the left)."
+                            "</div>",
                             unsafe_allow_html=True,
                         )
 
@@ -6237,34 +6300,47 @@ elif st.session_state.screen == "dmstuff":
                             import matplotlib.patheffects as _pe
                             from matplotlib.lines import Line2D as _L2D
     
-                            _user_pts_r   = _cplot["user_pts"]
-                            _match_pts_r  = _cplot["match_pts"]
-                            _aplus_label  = _cplot["aplus_label"]
+                            _user_pts_r      = _cplot["user_pts"]
+                            _match_pts_r     = _cplot["match_pts"]
+                            _aplus_label     = _cplot["aplus_label"]
                             _added_pitches_r = _cplot["added_pitches"]
-                            _PLT_COLORS_R = _cplot["plt_colors"]
-    
+                            _PLT_COLORS_R    = _cplot["plt_colors"]
+
+                            # user_pts / match_pts stored in arm-side-positive convention.
+                            # Display in catcher's view: RHP arm-side → right (+),
+                            # LHP arm-side → left (−), so flip HBs for LHP.
+                            _plt_sign = -1 if _hcode == "L" else 1
+                            _user_pts_disp  = {g: (_plt_sign * hb, ivb)
+                                               for g, (hb, ivb) in _user_pts_r.items()}
+                            _match_pts_disp = {g: (_plt_sign * hb, ivb)
+                                               for g, (hb, ivb) in _match_pts_r.items()}
+                            if _hcode == "L":
+                                _x_label = "Horizontal Break — catcher's view  (← LHP arm-side)"
+                            else:
+                                _x_label = "Horizontal Break — arm-side + (in)"
+
                             _fig, _ax = _plt.subplots(figsize=(4, 3.2))
                             _fig.patch.set_facecolor("#0c1420")
                             _ax.set_facecolor("#0e1828")
                             for _spine in _ax.spines.values():
                                 _spine.set_edgecolor("#1a2a40")
                             _ax.tick_params(colors="#5a7a90", labelsize=9)
-                            _ax.set_xlabel("Horizontal Break — arm-side + (in)", color="#5a7a90", fontsize=10)
+                            _ax.set_xlabel(_x_label, color="#5a7a90", fontsize=10)
                             _ax.set_ylabel("Induced Vertical Break (in)", color="#5a7a90", fontsize=10)
                             _ax.set_xlim(-25, 25)
                             _ax.set_ylim(-25, 25)
                             _ax.axhline(0, color="#1a2a40", lw=1, zorder=0)
                             _ax.axvline(0, color="#1a2a40", lw=1, zorder=0)
                             _ax.grid(True, color="#1a2a40", lw=0.5, alpha=0.6, zorder=0)
-    
-                            for _g, (_hb, _ivb) in _match_pts_r.items():
+
+                            for _g, (_hb, _ivb) in _match_pts_disp.items():
                                 _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
                                 _ax.scatter(_hb, _ivb, s=180, facecolors="none",
                                             edgecolors=_c, linewidths=2,
                                             marker="D", alpha=0.7, zorder=3)
-    
+
                             _plotted = []
-                            for _g, (_hb, _ivb) in _user_pts_r.items():
+                            for _g, (_hb, _ivb) in _user_pts_disp.items():
                                 _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
                                 _ax.scatter(_hb, _ivb, s=220, color=_c,
                                             edgecolors="white", linewidths=1.2,
@@ -6274,11 +6350,11 @@ elif st.session_state.screen == "dmstuff":
                                              fontsize=8, color=_c,
                                              path_effects=[_pe.withStroke(linewidth=2, foreground="#0e1828")])
                                 _plotted.append(_g)
-    
+
                             for _g in _plotted:
-                                if _g in _match_pts_r:
-                                    _ux, _uy = _user_pts_r[_g]
-                                    _mx, _my = _match_pts_r[_g]
+                                if _g in _match_pts_disp:
+                                    _ux, _uy = _user_pts_disp[_g]
+                                    _mx, _my = _match_pts_disp[_g]
                                     _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
                                     _ax.plot([_ux, _mx], [_uy, _my],
                                              color=_c, lw=1, linestyle="--", alpha=0.35, zorder=2)
@@ -6414,7 +6490,7 @@ elif st.session_state.screen == "dmstuff":
                             "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
                             "color:#3a5a78;margin-top:10px;padding:0 4px'>"
                             "Δ = change in arsenal Stuff+. "
-                            "Movement ±2.5\", velo ±2/3 mph, release ±0.25 ft, usage ±10%, pitch removal also tested. "
+                            "Movement ±2.5\", velo ±2/3 mph, release ±0.25 ft, usage ±20%, pitch removal also tested. "
                             "Click <b style='color:#a0c0d4'>Apply →</b> to update inputs and re-score."
                             "</div>",
                             unsafe_allow_html=True,
