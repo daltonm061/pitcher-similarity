@@ -619,7 +619,6 @@ PITCH_COLORS = {
 # and MLB per-pitch medians.
 _DATA_YEAR_RANGE = "2017–2025"
 _BRAND_GOLD      = "#d4a848"     # primary accent (was mixed with #c49148)
-_BRAND_GOLD_SOFT = "#c49148"     # kept available for secondary accents
 
 # Default placeholder examples (consistent across input + calculator)
 _PLACEHOLDER_REL_HEIGHT = "e.g. 5.80"
@@ -863,208 +862,6 @@ def load_zone_stuff():
 _zone_bundle = load_zone_stuff()
 _ZONE_AVAILABLE = _zone_bundle is not None
 
-
-# ── Arsenal Stuff+ model loader ───────────────────────────────────────────
-_ARSENAL_BUNDLE_PATH = _os.path.join(_os.path.dirname(__file__), "models", "arsenal_stuff_plus_v1.joblib")
-
-@st.cache_resource
-def load_arsenal_model():
-    """Load arsenal-level Stuff+ bundle. Returns None if not present."""
-    if not _os.path.exists(_ARSENAL_BUNDLE_PATH):
-        return None
-    try:
-        b = _joblib.load(_ARSENAL_BUNDLE_PATH)
-        print(f"  ✓ Loaded Arsenal Stuff+ bundle (version={b.get('version','unknown')})")
-        return b
-    except Exception as _e:
-        print(f"  ! Failed to load arsenal bundle: {_e}")
-        return None
-
-_arsenal_bundle = load_arsenal_model()
-_ARSENAL_MODEL_AVAILABLE = _arsenal_bundle is not None
-
-
-def _score_arsenal_model(pitches_dict, rel_height=None, rel_side=None, extension=None):
-    """⚠ DEAD CODE — kept for reference only.
-
-    Arsenal Stuff+ is currently computed as a usage-weighted average of per-pitch
-    Stuff+ scores in the calculator screen (see Arsenal Grade block). The
-    dedicated arsenal-level model trained here under-performed simple averaging
-    against CSW% / xwOBA outcomes (see audit comparing R² of arsenal model vs
-    simple average). The model bundle is still loaded for future experiments but
-    not called from the UI.
-
-    pitches_dict: same format as used in the calculator — keys are pitch group
-    names, values are dicts with 'velo', 'ivb', 'hb', 'spin_rate', 'usage_pct'.
-
-    Returns (arsenal_stuff_plus: float, grade: str) or (None, None) if unavailable.
-    """
-    if not _ARSENAL_MODEL_AVAILABLE or not pitches_dict:
-        return None, None
-
-    import numpy as _np
-    import pandas as _pd
-
-    b = _arsenal_bundle
-    FEATURES    = b["features"]
-    CAT_FEATURES = b["cat_features"]
-    PITCH_FEATURES = b["pitch_features"]
-    GROUP_TO_INT = b["group_to_int"]
-    norms        = b["norms"]
-    scaler       = b["scaler"]
-    cont_idx     = b["cont_idx"]
-    model        = b["model"]
-    baselines    = b.get("vaa_haa_baselines", {})
-
-    # Resolve release geometry
-    _rh  = float(rel_height)  if rel_height  is not None else 6.0
-    _rs  = float(rel_side)    if rel_side    is not None else 1.5
-    _ext = float(extension)   if extension   is not None else 6.4
-
-    # Determine handedness from entries (fallback RHP)
-    is_lefty = 0
-    for _pdata in pitches_dict.values():
-        if _pdata.get("pitcher_hand", "R") == "L":
-            is_lefty = 1
-            break
-
-    # Resolve primary FB velo/IVB/HB for differential features
-    _FB_PRIORITY = ["4-Seam", "2-Seam/Sinker", "Cutter"]
-    _primary_velo = _primary_ivb = _primary_hb = None
-    for _fb in _FB_PRIORITY:
-        if _fb in pitches_dict:
-            _primary_velo = float(pitches_dict[_fb].get("velo") or 92.0)
-            _primary_ivb  = float(pitches_dict[_fb].get("ivb")  or 14.0)
-            _primary_hb   = float(pitches_dict[_fb].get("hb")   or 6.0)
-            break
-    if _primary_velo is None:
-        # No FB — use fastest pitch
-        _fastest = max(pitches_dict.items(), key=lambda kv: float(kv[1].get("velo") or 0))
-        _primary_velo = float(_fastest[1].get("velo") or 92.0)
-        _primary_ivb  = float(_fastest[1].get("ivb")  or 14.0)
-        _primary_hb   = float(_fastest[1].get("hb")   or 6.0)
-
-    # Build per-pitch-type feature rows then usage-weight them
-    total_n = sum(float(v.get("usage_pct") or 1.0) for v in pitches_dict.values())
-    if total_n == 0:
-        total_n = len(pitches_dict)
-
-    all_velos = [float(v.get("velo") or 90) for v in pitches_dict.values()]
-    all_ivbs  = [float(v.get("ivb")  or 10) for v in pitches_dict.values()]
-    all_hbs   = [float(v.get("hb")   or 5)  for v in pitches_dict.values()]
-
-    wavg = {}
-    for feat in [f for f in PITCH_FEATURES if f not in ["pitch_type_int", "is_lefty"]]:
-        wavg[f"{feat}_wavg"] = 0.0
-
-    for grp, pdata in pitches_dict.items():
-        _pt_int = GROUP_TO_INT.get(grp, 0)
-        _velo   = float(pdata.get("velo") or 90.0)
-        _ivb    = float(pdata.get("ivb")  or 10.0)
-        _hb     = float(pdata.get("hb")   or 5.0)
-        _spin   = float(pdata.get("spin_rate") or 2300.0)
-        _usage  = float(pdata.get("usage_pct") or 1.0) / total_n
-
-        # VAA-AA: approximate using baselines (rel_height → expected VAA residual)
-        _bl_key = ("vaa", int(_pt_int), int(is_lefty))
-        if _bl_key in baselines:
-            _intercept, _slope = baselines[_bl_key]
-            # vaa_aa ≈ 0 for typical release (residual is by definition mean-zero)
-            _vaa_aa = 0.0 - (_intercept + _slope * _rh - (_intercept + _slope * 6.0))
-        else:
-            _vaa_aa = 0.0
-
-        # Differentials vs primary FB
-        _velo_diff = _velo - _primary_velo
-        _hb_diff   = _hb   - _primary_hb
-
-        # Arsenal context: compute from entered pitches
-        _other_velos = [v for v in all_velos if v != _velo]
-        _other_ivbs  = [v for v in all_ivbs]
-        _other_hbs   = [v for v in all_hbs]
-
-        _arsenal_size = len(pitches_dict)
-        if len(pitches_dict) > 1:
-            _others_excl = [(g, d) for g, d in pitches_dict.items() if g != grp]
-            _ov = [float(d.get("velo") or 90) for _, d in _others_excl]
-            _oi = [float(d.get("ivb")  or 10) for _, d in _others_excl]
-            _oh = [float(d.get("hb")   or 5)  for _, d in _others_excl]
-            _ivb_spread = max(_oi) - min(_oi) if _oi else 0.0
-            _hb_spread  = max(_oh) - min(_oh) if _oh else 0.0
-            _ivb_max_other = max(_oi) if _oi else _ivb
-            _ivb_min_other = min(_oi) if _oi else _ivb
-            _hb_max_other  = max(_oh) if _oh else _hb
-            _hb_min_other  = min(_oh) if _oh else _hb
-            _slower = [v for v in _ov if v < _velo]
-            _velo_diff_secondary = (_velo - max(_slower)) if _slower else (_velo - max(_ov)) if _ov else 0.0
-            _vgaps = [abs(v - _velo) for v in _ov]
-            _j = _vgaps.index(min(_vgaps))
-            _near_velo_diff = _velo - _ov[_j]
-            _near_ivb_diff  = _ivb  - _oi[_j]
-            _near_hb_diff   = _hb   - _oh[_j]
-        else:
-            _ivb_spread = _hb_spread = 0.0
-            _ivb_max_other = _ivb_min_other = _ivb
-            _hb_max_other  = _hb_min_other  = _hb
-            _velo_diff_secondary = _near_velo_diff = _near_ivb_diff = _near_hb_diff = 0.0
-
-        # SSW ≈ 0 (not computable without full physics; model handles NaN ok)
-        _ssw = 0.0
-        _active_spin = _spin * 0.85  # league-avg active fraction ~85%
-
-        pitch_vals = {
-            "start_speed": _velo, "spin_rate": _spin, "ivb_in": _ivb,
-            "vaa_aa": _vaa_aa, "rel_height": _rh, "rel_side_arm": _rs, "extension": _ext,
-            "velo_diff": _velo_diff, "hb_diff": _hb_diff,
-            "ssw_magnitude": _ssw,
-            "rel_height_x_velo": _rh * _velo,
-            "rel_side_x_typeint": _rs * _pt_int,
-            "active_spin_rate": _active_spin,
-            "rel_quadrant": _rh * _rs,
-            "velo_diff_secondary": _velo_diff_secondary,
-            "arsenal_size": float(_arsenal_size),
-            "arsenal_ivb_spread": _ivb_spread,
-            "arsenal_hb_spread": _hb_spread,
-            "arsenal_ivb_max_other": _ivb_max_other,
-            "arsenal_ivb_min_other": _ivb_min_other,
-            "arsenal_hb_max_other": _hb_max_other,
-            "arsenal_hb_min_other": _hb_min_other,
-            "nearest_other_velo_diff": _near_velo_diff,
-            "nearest_other_ivb_diff": _near_ivb_diff,
-            "nearest_other_hb_diff": _near_hb_diff,
-        }
-        for feat, val in pitch_vals.items():
-            wavg_key = f"{feat}_wavg"
-            if wavg_key in wavg:
-                wavg[wavg_key] += val * _usage
-
-    # Arsenal-level aggregate features
-    wavg["primary_pitch_type_int"] = float(GROUP_TO_INT.get(
-        next((g for g in _FB_PRIORITY if g in pitches_dict), list(pitches_dict.keys())[0]), 0))
-    wavg["is_lefty"] = float(is_lefty)
-    wavg["arsenal_n_types"]     = float(len(pitches_dict))
-    wavg["arsenal_velo_spread"] = float(max(all_velos) - min(all_velos)) if len(all_velos) > 1 else 0.0
-    wavg["arsenal_ivb_range"]   = float(max(all_ivbs)  - min(all_ivbs))  if len(all_ivbs)  > 1 else 0.0
-    wavg["arsenal_hb_range"]    = float(max(all_hbs)   - min(all_hbs))   if len(all_hbs)   > 1 else 0.0
-
-    # Build feature vector
-    row_vals = [wavg.get(f, 0.0) for f in FEATURES]
-    X = _np.array([row_vals], dtype=_np.float64)
-    X[:, cont_idx] = scaler.transform(X[:, cont_idx])
-
-    raw = float(model.predict(X)[0])
-    m_, s_ = norms["overall"]["mean"], max(norms["overall"]["sd"], 1e-6)
-    asp = round(100.0 + ((raw - m_) / s_) * 10.0, 1)
-
-    if asp >= 120:   grade = "A+"
-    elif asp >= 112: grade = "A"
-    elif asp >= 107: grade = "B+"
-    elif asp >= 102: grade = "B"
-    elif asp >= 97:  grade = "C+"
-    elif asp >= 92:  grade = "C"
-    else:            grade = "D"
-
-    return asp, grade
 
 
 # Median values for v5 features — used to fill missing inputs at scoring time.
@@ -2927,14 +2724,6 @@ def sim_color(s):
     if s >= 45: return "#f4a261"
     return "#e06060"
 
-def last_name(full):
-    """Extract last name for display."""
-    parts = full.strip().split(",")
-    if len(parts) > 1:
-        return parts[0].strip()
-    parts = full.strip().split()
-    return parts[-1] if parts else full
-
 
 # ── Dynamic velo weight (#5) ──────────────────────────────────────────────────
 
@@ -3336,7 +3125,7 @@ def parse_trackman(file_bytes, filename) -> dict:
                 floats = []
                 for n in nums:
                     try: floats.append(float(n))
-                    except: pass
+                    except ValueError: pass
 
                 if len(floats) < 3:
                     continue
@@ -3510,7 +3299,7 @@ def parse_trackman_image(file_bytes: bytes, filename: str) -> dict:
         floats = []
         for n in nums:
             try: floats.append(float(n))
-            except: pass
+            except ValueError: pass
         if len(floats) < 2:
             continue
         metric_nums = [f for f in floats
@@ -6044,26 +5833,81 @@ elif st.session_state.screen == "dmstuff":
                                                      "field": "usage", "value": round(_new_usage, 1)},
                                                 ))
 
-                                    # 6. Remove each pitch — only when result keeps ≥ 2 pitches.
-                                    # Going from 2→1 pitch changes arsenal-context scoring
-                                    # (single-pitch uses MLB-average context), which can
-                                    # produce misleadingly large positive deltas.
+                                    # 6. Remove each pitch — but only when the removal is
+                                    # STABLE under re-computation. Two known instabilities:
+                                    #   (a) Removing the primary fastball (highest priority
+                                    #       in [4-Seam, 2-Seam/Sinker, Cutter] that the user
+                                    #       has) shifts velo_diff/ivb_diff/hb_diff for every
+                                    #       other pitch — the prediction becomes unreliable
+                                    #       and often disagrees with the actual recompute.
+                                    #   (b) For LHP: removing a pitch can flip the majority
+                                    #       in the catcher's-view HB-sign auto-detection,
+                                    #       producing a different scored arsenal than the
+                                    #       suggestion previewed.
+                                    # Also require the result keeps ≥ 2 pitches and the
+                                    # predicted delta exceeds a conservative bar.
+                                    _FB_PRIORITY_S = ["4-Seam", "2-Seam/Sinker", "Cutter"]
+                                    _user_primary_fb = next(
+                                        (fb for fb in _FB_PRIORITY_S if fb in pitches_dict),
+                                        None,
+                                    )
+
+                                    def _flip_majority_after_remove(grp_removed):
+                                        """For LHP only — would removing `grp_removed` change
+                                        the auto-flip decision? Returns True if removal would
+                                        alter the majority, which makes the suggestion unsafe."""
+                                        if hand_code != "L":
+                                            return False
+                                        _EXP = {
+                                            "4-Seam": +1, "2-Seam/Sinker": +1,
+                                            "Splitter": +1, "Changeup": +1,
+                                            "Slider": -1, "Sweeper": -1,
+                                        }
+                                        def _majority(pd_in):
+                                            wrong = total = 0
+                                            for g, pd in pd_in.items():
+                                                hb = pd.get("hb")
+                                                exp = _EXP.get(g)
+                                                if hb is None or exp is None or hb == 0:
+                                                    continue
+                                                total += 1
+                                                if (1 if hb > 0 else -1) != exp:
+                                                    wrong += 1
+                                            return total > 0 and wrong > total / 2
+                                        # NOTE: pitches_dict here is POST-FLIP. To test the
+                                        # majority on raw inputs we'd need session-state HBs.
+                                        # Conservative proxy: if any pitch in the expected-sign
+                                        # map is being removed and the arsenal is small (≤4),
+                                        # skip — the majority is fragile.
+                                        if grp_removed in _EXP and len(pitches_dict) <= 4:
+                                            return True
+                                        return False
+
                                     if len(pitches_dict) > 2:
                                         for _grp in list(pitches_dict.keys()):
+                                            # (a) Never suggest removing the primary FB
+                                            if _grp == _user_primary_fb:
+                                                continue
+                                            # (b) Skip LHP cases where the flip decision is fragile
+                                            if _flip_majority_after_remove(_grp):
+                                                continue
                                             _try_d = {g: dict(v) for g, v in pitches_dict.items()
                                                       if g != _grp}
                                             _new_mean = _rescore_mean(_try_d)
-                                            if _new_mean is not None:
-                                                _delta = _new_mean - _baseline_mean
-                                                # Apply a higher bar for removal suggestions
-                                                # to avoid noise from arsenal-context shifts
-                                                if _delta > 1.0:
-                                                    _suggestions.append((
-                                                        _delta,
-                                                        f"Remove {_grp}",
-                                                        f"{len(pitches_dict) - 1}-pitch arsenal",
-                                                        {"type": "remove_pitch", "group": _grp},
-                                                    ))
+                                            if _new_mean is None:
+                                                continue
+                                            _delta = _new_mean - _baseline_mean
+                                            # Conservative bar (was > 1.0). Removal is a
+                                            # major arsenal change — only suggest when the
+                                            # gain is unambiguous.
+                                            if _delta <= 2.5:
+                                                continue
+                                            _suggestions.append((
+                                                _delta,
+                                                f"Remove {_grp}",
+                                                f"{len(pitches_dict) - 1}-pitch arsenal",
+                                                {"type": "remove_pitch", "group": _grp},
+                                            ))
 
                                 _suggestions.sort(key=lambda x: -x[0])
                                 st.session_state["_dm_cache"]["top5"] = [
