@@ -5743,89 +5743,140 @@ elif st.session_state.screen == "dmstuff":
                                     _info = _score_arsenal_combined(
                                         {g: _s[g] for g in pd_dict if g in _s}, usage=_u,
                                     )
+                                    # Use overall (avg of both platoon sides) so optimisation
+                                    # targets the same metric shown in the display.
+                                    _rhb = _info.get("arsenal_stuff_plus_vs_rhb")
+                                    _lhb = _info.get("arsenal_stuff_plus_vs_lhb")
+                                    if _rhb is not None and _lhb is not None:
+                                        return (_rhb + _lhb) / 2.0
                                     _asp = _info.get("arsenal_stuff_plus")
                                     if _asp is not None:
                                         return float(_asp)
                                     _vs = [_s[g]["stuff_plus"] for g in pd_dict if g in _s]
                                     return sum(_vs) / len(_vs) if _vs else None
 
+                                # Penalty per inch of movement away from current position.
+                                # Keeps targets close to current shape (least-change preference).
+                                _DIST_PENALTY = 0.20
+
                                 def _best_movement(grp, base_dict, max_delta=4.0):
                                     _bd = _SEARCH_BOUNDS.get(grp, {"ivb": (-15, 25), "hb": (-25, 25)})
                                     _pd_m = base_dict[grp]
-                                    _velo_m = _pd_m.get("velo", 90)
-                                    _spin_m = _pd_m.get("spin_rate")
+                                    _velo_m  = _pd_m.get("velo", 90)
+                                    _spin_m  = _pd_m.get("spin_rate")
+                                    _usage_m = _pd_m.get("usage_pct")
                                     _cur_ivb_m = _pd_m.get("ivb") or _V5_MEDIANS["ivb_in"]
-                                    # hb_arm_in median is glove-side-pos; negate to get arm-side-pos
+                                    # hb_arm_in median is glove-side-pos; negate → arm-side-pos
                                     _cur_hb_m  = _pd_m.get("hb") or (-_V5_MEDIANS["hb_arm_in"])
                                     _iv_lo = max(_bd["ivb"][0], _cur_ivb_m - max_delta)
                                     _iv_hi = min(_bd["ivb"][1], _cur_ivb_m + max_delta)
                                     _hb_lo = max(_bd["hb"][0],  _cur_hb_m  - max_delta)
                                     _hb_hi = min(_bd["hb"][1],  _cur_hb_m  + max_delta)
-                                    _best_sp_m = -1e9
+                                    _best_obj  = -1e9
                                     _best_iv_m, _best_hb_vm = None, None
                                     for _iv in np.linspace(_iv_lo, _iv_hi, 5):
                                         for _hb_v in np.linspace(_hb_lo, _hb_hi, 5):
                                             _trial = dict(base_dict)
+                                            # Preserve usage_pct so weight normalisation is correct
                                             _trial[grp] = {"velo": _velo_m, "ivb": _iv,
-                                                           "hb": _hb_v, "spin_rate": _spin_m}
+                                                           "hb": _hb_v, "spin_rate": _spin_m,
+                                                           "usage_pct": _usage_m}
                                             _sp_m = _score_mean(_trial)
-                                            if _sp_m is not None and _sp_m > _best_sp_m:
-                                                _best_sp_m = _sp_m
-                                                _best_iv_m = _iv
-                                                _best_hb_vm = _hb_v
+                                            if _sp_m is not None:
+                                                _dist = np.sqrt((_iv - _cur_ivb_m)**2
+                                                                + (_hb_v - _cur_hb_m)**2)
+                                                _obj = _sp_m - _DIST_PENALTY * _dist
+                                                if _obj > _best_obj:
+                                                    _best_obj = _obj
+                                                    _best_iv_m = _iv
+                                                    _best_hb_vm = _hb_v
                                     if _best_iv_m is None:
                                         return None, None
+                                    # Fine search — stay within coarse bounds
                                     _iv_step = (_iv_hi - _iv_lo) / 4
                                     _hb_step = (_hb_hi - _hb_lo) / 4
-                                    for _iv in np.linspace(_best_iv_m - _iv_step, _best_iv_m + _iv_step, 5):
-                                        for _hb_v in np.linspace(_best_hb_vm - _hb_step, _best_hb_vm + _hb_step, 5):
+                                    _fiv_lo = max(_iv_lo, _best_iv_m - _iv_step)
+                                    _fiv_hi = min(_iv_hi, _best_iv_m + _iv_step)
+                                    _fhb_lo = max(_hb_lo, _best_hb_vm - _hb_step)
+                                    _fhb_hi = min(_hb_hi, _best_hb_vm + _hb_step)
+                                    for _iv in np.linspace(_fiv_lo, _fiv_hi, 5):
+                                        for _hb_v in np.linspace(_fhb_lo, _fhb_hi, 5):
                                             _trial = dict(base_dict)
                                             _trial[grp] = {"velo": _velo_m, "ivb": _iv,
-                                                           "hb": _hb_v, "spin_rate": _spin_m}
+                                                           "hb": _hb_v, "spin_rate": _spin_m,
+                                                           "usage_pct": _usage_m}
                                             _sp_m = _score_mean(_trial)
-                                            if _sp_m is not None and _sp_m > _best_sp_m:
-                                                _best_sp_m = _sp_m
-                                                _best_iv_m = _iv
-                                                _best_hb_vm = _hb_v
+                                            if _sp_m is not None:
+                                                _dist = np.sqrt((_iv - _cur_ivb_m)**2
+                                                                + (_hb_v - _cur_hb_m)**2)
+                                                _obj = _sp_m - _DIST_PENALTY * _dist
+                                                if _obj > _best_obj:
+                                                    _best_obj = _obj
+                                                    _best_iv_m = _iv
+                                                    _best_hb_vm = _hb_v
                                     return _best_iv_m, _best_hb_vm
 
-                                with st.spinner("Optimising movement profile…"):
-                                    _opt_dict = {g: dict(v) for g, v in pitches_dict.items()}
-                                    for _g in list(pitches_dict.keys()):
-                                        _oi, _oh = _best_movement(_g, _opt_dict)
-                                        if _oi is not None:
-                                            _opt_dict[_g]["ivb"] = _oi
-                                            _opt_dict[_g]["hb"]  = _oh
-
-                                _opt_mean = _score_mean(_opt_dict) or 0.0
+                                # Current score before any optimisation
+                                _current_mean = _score_mean(pitches_dict) or 0.0
 
                                 _added_pitches = []
-                                _missing_grps = [g for g in _MLB_PITCH_MEDIANS if g not in pitches_dict]
-                                while _opt_mean < 112.0 and _missing_grps:
-                                    _best_add_sp = _opt_mean
-                                    _best_add_g  = None
-                                    for _cand in _missing_grps:
-                                        _try_d = dict(_opt_dict)
-                                        _try_d[_cand] = dict(_MLB_PITCH_MEDIANS[_cand])
-                                        _sp_a = _score_mean(_try_d)
-                                        if _sp_a is not None and _sp_a > _best_add_sp:
-                                            _best_add_sp = _sp_a; _best_add_g = _cand
-                                    if _best_add_g is None:
-                                        break
-                                    _opt_dict[_best_add_g] = dict(_MLB_PITCH_MEDIANS[_best_add_g])
-                                    _missing_grps.remove(_best_add_g)
-                                    _added_pitches.append(_best_add_g)
-                                    _opt_mean = _best_add_sp
+                                if _current_mean >= 120.0:
+                                    # Already A+ — no movement changes needed.
+                                    # Target = current positions so no confusing arrows.
+                                    _opt_dict = {g: dict(v) for g, v in pitches_dict.items()}
+                                    _opt_mean = _current_mean
+                                else:
+                                    # Optimise movement — two passes so each pitch can react
+                                    # to changes the previous pass made to its neighbours.
+                                    with st.spinner("Optimising movement profile…"):
+                                        _opt_dict = {g: dict(v) for g, v in pitches_dict.items()}
+                                        for _pass in range(2):
+                                            for _g in list(pitches_dict.keys()):
+                                                _oi, _oh = _best_movement(_g, _opt_dict)
+                                                if _oi is not None:
+                                                    _opt_dict[_g]["ivb"] = _oi
+                                                    _opt_dict[_g]["hb"]  = _oh
 
+                                    # Non-regression guard: revert if optimisation degraded score
+                                    _opt_mean = _score_mean(_opt_dict) or 0.0
+                                    if _opt_mean < _current_mean - 0.1:
+                                        _opt_dict = {g: dict(v) for g, v in pitches_dict.items()}
+                                        _opt_mean = _current_mean
+
+                                    # Try adding a pitch only if still below A+ after movement opt
+                                    _missing_grps = [g for g in _MLB_PITCH_MEDIANS
+                                                     if g not in pitches_dict]
+                                    while _opt_mean < 120.0 and _missing_grps:
+                                        _best_add_sp = _opt_mean
+                                        _best_add_g  = None
+                                        for _cand in _missing_grps:
+                                            _try_d = dict(_opt_dict)
+                                            _try_d[_cand] = dict(_MLB_PITCH_MEDIANS[_cand])
+                                            _sp_a = _score_mean(_try_d)
+                                            if _sp_a is not None and _sp_a > _best_add_sp:
+                                                _best_add_sp = _sp_a; _best_add_g = _cand
+                                        if _best_add_g is None:
+                                            break
+                                        _opt_dict[_best_add_g] = dict(_MLB_PITCH_MEDIANS[_best_add_g])
+                                        _missing_grps.remove(_best_add_g)
+                                        _added_pitches.append(_best_add_g)
+                                        _opt_mean = _best_add_sp
+
+                                # Build match_pts only for the user's own pitches
+                                # (added pitches are annotated in the caption, not plotted)
                                 _match_pts = {}
-                                for _g, _pd_mp in _opt_dict.items():
+                                for _g in pitches_dict:
+                                    _pd_mp = _opt_dict.get(_g, {})
                                     _oi_mp = _pd_mp.get("ivb"); _oh_mp = _pd_mp.get("hb")
                                     if _oi_mp is not None and _oh_mp is not None:
                                         _match_pts[_g] = (float(_oh_mp), float(_oi_mp))
 
-                                _aplus_label = f"A+ target · avg {_opt_mean:.1f}"
-                                if _added_pitches:
-                                    _aplus_label += f" (added: {', '.join(_added_pitches)})"
+                                if _current_mean >= 120.0:
+                                    _aplus_label = f"A+ ✓ current shapes · {_opt_mean:.1f}"
+                                else:
+                                    _aplus_label = f"A+ target · {_opt_mean:.1f}"
+                                    if _added_pitches:
+                                        _aplus_label += f" (+ {', '.join(_added_pitches)})"
 
                                 st.session_state["_dm_cache"]["plot"] = {
                                     "user_pts":      _user_pts,
@@ -5834,6 +5885,7 @@ elif st.session_state.screen == "dmstuff":
                                     "added_pitches": _added_pitches,
                                     "opt_mean":      _opt_mean,
                                     "plt_colors":    _PLT_COLORS,
+                                    "already_aplus": (_current_mean >= 120.0),
                                 }
                             except Exception as _plot_err:
                                 st.session_state["_dm_cache"]["plot_error"] = str(_plot_err)
@@ -5855,6 +5907,11 @@ elif st.session_state.screen == "dmstuff":
                                     _info = _score_arsenal_combined(
                                         {g: _s[g] for g in mod_pitches if g in _s}, usage=_u,
                                     )
+                                    # Use overall (avg of both platoon sides) to match display.
+                                    _rhb = _info.get("arsenal_stuff_plus_vs_rhb")
+                                    _lhb = _info.get("arsenal_stuff_plus_vs_lhb")
+                                    if _rhb is not None and _lhb is not None:
+                                        return (_rhb + _lhb) / 2.0
                                     _asp = _info.get("arsenal_stuff_plus")
                                     if _asp is not None:
                                         return float(_asp)
@@ -6341,7 +6398,20 @@ elif st.session_state.screen == "dmstuff":
                             _ax.axvline(0, color="#1a2a40", lw=1, zorder=0)
                             _ax.grid(True, color="#1a2a40", lw=0.5, alpha=0.6, zorder=0)
 
+                            # Minimum movement (in.) to show a diamond/arrow.
+                            # Suppresses visual noise for already-optimal pitches.
+                            _MIN_MOVE = 0.5
+                            _already_aplus_r = _cplot.get("already_aplus", False)
+
+                            # Diamonds — only where movement exceeds threshold
+                            _has_targets = False
                             for _g, (_hb, _ivb) in _match_pts_disp.items():
+                                if _g not in _user_pts_disp:
+                                    continue
+                                _ux0, _uy0 = _user_pts_disp[_g]
+                                if np.sqrt((_hb - _ux0)**2 + (_ivb - _uy0)**2) < _MIN_MOVE:
+                                    continue
+                                _has_targets = True
                                 _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
                                 _ax.scatter(_hb, _ivb, s=180, facecolors="none",
                                             edgecolors=_c, linewidths=2,
@@ -6359,36 +6429,57 @@ elif st.session_state.screen == "dmstuff":
                                              path_effects=[_pe.withStroke(linewidth=2, foreground="#0e1828")])
                                 _plotted.append(_g)
 
+                            # Arrows — only for meaningful movement
                             for _g in _plotted:
                                 if _g in _match_pts_disp:
                                     _ux, _uy = _user_pts_disp[_g]
                                     _mx, _my = _match_pts_disp[_g]
+                                    if np.sqrt((_mx - _ux)**2 + (_my - _uy)**2) < _MIN_MOVE:
+                                        continue
                                     _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
                                     _ax.plot([_ux, _mx], [_uy, _my],
                                              color=_c, lw=1, linestyle="--", alpha=0.35, zorder=2)
-    
+
+                            _target_label = "A+ target" if _has_targets else "A+ current shape"
                             _legend_elems = [
                                 _L2D([0],[0], marker="o", color="w", markerfacecolor="#aaaaaa",
                                      markersize=8, label="Your arsenal", linestyle="None"),
-                                _L2D([0],[0], marker="D", color="w", markerfacecolor="none",
-                                     markeredgecolor="#aaaaaa", markersize=8,
-                                     label="A+ target", linestyle="None"),
                             ]
+                            if _has_targets:
+                                _legend_elems.append(
+                                    _L2D([0],[0], marker="D", color="w", markerfacecolor="none",
+                                         markeredgecolor="#aaaaaa", markersize=8,
+                                         label="A+ target shape", linestyle="None")
+                                )
                             _ax.legend(handles=_legend_elems, facecolor="#0e1828",
                                        edgecolor="#1a2a40", labelcolor="#a0c0d4",
                                        fontsize=7, loc="best")
                             _plt.tight_layout(pad=1.0)
                             st.pyplot(_fig, use_container_width=True)
                             _plt.close(_fig)
-    
-                            _caption = (
-                                f"<b style='color:#a0c0d4'>{_aplus_label}</b> — "
-                                "diamonds show the optimised IVB/HB for your pitch types "
-                                "(same velo &amp; release) that maximises Stuff+."
-                            )
+
+                            if _already_aplus_r:
+                                _caption = (
+                                    f"<b style='color:#a0c0d4'>{_aplus_label}</b> — "
+                                    "your current shapes already achieve A+. "
+                                    "No movement changes needed."
+                                )
+                            elif _has_targets:
+                                _caption = (
+                                    f"<b style='color:#a0c0d4'>{_aplus_label}</b> — "
+                                    "diamonds show the minimum movement change per pitch "
+                                    "(same velo &amp; release) toward A+. "
+                                    "Pitches without diamonds are already in their optimal range."
+                                )
+                            else:
+                                _caption = (
+                                    f"<b style='color:#a0c0d4'>{_aplus_label}</b> — "
+                                    "all pitches are within 0.5″ of their optimal shapes. "
+                                    "Current movement profile is near-optimal."
+                                )
                             if _added_pitches_r:
                                 _caption += (
-                                    f" Reaching A+ required adding: "
+                                    f" To reach A+, consider adding: "
                                     f"<b style='color:#c49148'>{', '.join(_added_pitches_r)}</b>."
                                 )
                             st.markdown(
