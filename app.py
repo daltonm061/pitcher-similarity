@@ -974,6 +974,310 @@ _zone_bundle = load_zone_stuff()
 _ZONE_AVAILABLE = _zone_bundle is not None
 
 
+# ── Usage-Outcome model v3b loader ──────────────────────────────────────
+# Trained by train_usage_model_v3b.py. Predicts arsenal-level outcome
+# (composite of CSW, Whiff, xwOBA, delta_run_exp) from full arsenal
+# context: shape × usage × batter quality, on monthly grain.
+# Bundle contains:
+#   model_vs_RHB, model_vs_LHB  — per-platoon LightGBM regressors
+#   feature_names               — exact order required for predict()
+#   tunnel_lambda_vs_{R,L}HB    — fitted pairwise tunneling slopes
+#   tunnel_sigmas               — Gaussian kernel bandwidths
+#   league_batter               — {xwoba, k, bb} league means for fillers
+#   fe_kappa, fe_table          — pitcher fixed-effects (we don't use FE
+#                                  at calculator inference time — we
+#                                  predict on residualized scale)
+_USAGE_V3B_PATH = _os.path.join(_os.path.dirname(__file__),
+                                  "models", "usage_outcome_v3b.joblib")
+
+@st.cache_resource
+def load_usage_v3b():
+    """Return v3b bundle dict or None if file not present."""
+    if not _os.path.exists(_USAGE_V3B_PATH):
+        return None
+    try:
+        b = _joblib.load(_USAGE_V3B_PATH)
+        print(f"  ✓ Loaded usage-outcome v3b "
+              f"(features={len(b.get('feature_names', [])) if b else 0})")
+        return b
+    except Exception as _e:
+        print(f"  ! Failed to load usage v3b: {_e}")
+        return None
+
+_usage_v3b = load_usage_v3b()
+_USAGE_V3B_AVAILABLE = _usage_v3b is not None
+
+
+# ── v3b: arsenal-outcome prediction + usage suggestion helpers ──────────
+# These are the inference-time entry points. Context features that the
+# calculator doesn't capture (count state, batter quality, in-PA
+# sequence) are set to neutral / league-typical values so the predicted
+# per-pitch f() can be interpreted as "expected per-pitch outcome
+# against a league-typical batter pool across a typical count
+# distribution." This is the right semantic for cross-pitcher arsenal
+# ranking. It is NOT correct for predicting any specific game.
+
+# v3b's per-pitch feature schema (must match train_usage_model_v3b.py
+# build_per_pitch_features exactly — keep in sync if either file changes)
+_V3B_NEUTRAL_FEATURES = {
+    "balls":              1,       # mid count
+    "strikes":            1,
+    "is_same_hand":       0,       # default to opposite-hand matchup
+    "times_faced":        2,       # midpoint of 1/2/3+
+    "pitch_num_in_app":   40,
+    "pitch_num_log":      np.log1p(40),
+    "pitch_in_pa":        3,
+    "prior_velo":         np.nan,  # LightGBM handles NaN
+    "prior_ivb":          np.nan,
+    "prior_hb":           np.nan,
+    "prior_pt_int":       np.nan,
+    "velo_gap_prior":     np.nan,
+    "ivb_gap_prior":      np.nan,
+    "hb_gap_prior":       np.nan,
+}
+
+# Pitch group → integer (matches GROUP_TO_INT in train_usage_model_v3b.py)
+_V3B_GROUP_TO_INT = {g: i + 1 for i, g in enumerate([
+    "4-Seam", "2-Seam/Sinker", "Cutter",
+    "Slider", "Sweeper", "Curveball",
+    "Splitter", "Changeup", "Knuckleball",
+])}
+
+def _v3b_per_pitch_feature_row(pitch_group, velo, ivb, hb_arm_positive,
+                                 spin_rate, rel_height, rel_side_arm, extension,
+                                 hand, is_same_hand):
+    """Build one row for v3b's per-pitch model in the exact feature order
+    the bundle expects.
+
+    Inputs use CALCULATOR conventions:
+      hb_arm_positive: arm-side-positive (matches calculator input)
+      hand: 'R' or 'L'
+
+    The model was trained with HB in `hb_arm_in` glove-side-positive
+    convention. We negate the input to match.
+    """
+    if _usage_v3b is None:
+        return None
+    feat_names = _usage_v3b.get("feature_names") or []
+    if not feat_names:
+        return None
+    lb = _usage_v3b.get("league_batter") or {}
+    bat_xwoba = float(lb.get("xwoba", 0.310))
+    bat_k     = float(lb.get("k",     0.225))
+    bat_bb    = float(lb.get("bb",    0.085))
+    is_lefty  = 1 if str(hand).upper().startswith("L") else 0
+    # Calculator HB is arm-side-positive; v3b internal hb_arm is glove-side-positive
+    hb_arm = -float(hb_arm_positive) if hb_arm_positive is not None else 0.0
+    pt_int = _V3B_GROUP_TO_INT.get(pitch_group, 0)
+    velo_f  = float(velo) if velo is not None else 90.0
+    ivb_f   = float(ivb)  if ivb  is not None else 12.0
+    spin_f  = float(spin_rate) if spin_rate is not None else 2200.0
+    ext_f   = float(extension) if extension is not None else 6.4
+    rh_f    = float(rel_height) if rel_height is not None else 5.8
+    rs_f    = float(rel_side_arm) if rel_side_arm is not None else 1.5
+    rs_arm  = abs(rs_f)   # arm-side positive
+    bauer   = spin_f / max(velo_f, 50.0)
+    total_break = (ivb_f**2 + hb_arm**2) ** 0.5
+    ivb_per_spin = ivb_f / max(spin_f, 500.0) * 1000
+    hb_per_spin  = hb_arm / max(spin_f, 500.0) * 1000
+    feat_dict = {
+        "velo":              velo_f,
+        "ivb":               ivb_f,
+        "hb_arm":            hb_arm,
+        "spin_rate":         spin_f,
+        "extension":         ext_f,
+        "rel_height":        rh_f,
+        "rel_side_arm":      rs_arm,
+        "pitch_type_int":    pt_int,
+        "is_lefty":          is_lefty,
+        "balls":             _V3B_NEUTRAL_FEATURES["balls"],
+        "strikes":           _V3B_NEUTRAL_FEATURES["strikes"],
+        "is_same_hand":      int(is_same_hand),
+        "total_break":       total_break,
+        "bauer":             bauer,
+        "ivb_per_spin":      ivb_per_spin,
+        "hb_per_spin":       hb_per_spin,
+        "batter_xwoba":      bat_xwoba,
+        "batter_k_pct":      bat_k,
+        "batter_bb_pct":     bat_bb,
+        "batter_has_prior":  1,
+        "times_faced":       _V3B_NEUTRAL_FEATURES["times_faced"],
+        "pitch_num_in_app":  _V3B_NEUTRAL_FEATURES["pitch_num_in_app"],
+        "pitch_num_log":     _V3B_NEUTRAL_FEATURES["pitch_num_log"],
+        "pitch_in_pa":       _V3B_NEUTRAL_FEATURES["pitch_in_pa"],
+        "prior_velo":        _V3B_NEUTRAL_FEATURES["prior_velo"],
+        "prior_ivb":         _V3B_NEUTRAL_FEATURES["prior_ivb"],
+        "prior_hb":          _V3B_NEUTRAL_FEATURES["prior_hb"],
+        "prior_pt_int":      _V3B_NEUTRAL_FEATURES["prior_pt_int"],
+        "velo_gap_prior":    _V3B_NEUTRAL_FEATURES["velo_gap_prior"],
+        "ivb_gap_prior":     _V3B_NEUTRAL_FEATURES["ivb_gap_prior"],
+        "hb_gap_prior":      _V3B_NEUTRAL_FEATURES["hb_gap_prior"],
+    }
+    # Return in the exact column order the bundle expects
+    return [feat_dict.get(n, np.nan) for n in feat_names]
+
+
+def _v3b_predict_arsenal(pitches_dict, rel_height, rel_side_arm, extension,
+                           hand, usages):
+    """Predict v3b arsenal-level outcome on the residualized scale.
+
+    pitches_dict: {group: {velo, ivb, hb (arm-side+), spin_rate}, ...}
+    usages: {group: fraction in [0,1]} — must sum to ~1
+    Returns: (pred_avg, per_group_pred dict, tunnel_correction)
+              Both stands (R, L) are predicted and averaged.
+    """
+    if _usage_v3b is None or not pitches_dict:
+        return None, {}, 0.0
+    feat_names = _usage_v3b["feature_names"]
+    out_per_stand = {}
+    per_group_by_stand = {"R": {}, "L": {}}
+    for stand_code in ("R", "L"):
+        model = _usage_v3b.get(f"model_vs_{stand_code}HB")
+        if model is None:
+            continue
+        is_same_hand_flag = 1 if str(hand).upper().startswith(stand_code) else 0
+        per_group = {}
+        for grp, pd_g in pitches_dict.items():
+            row = _v3b_per_pitch_feature_row(
+                pitch_group=grp,
+                velo=pd_g.get("velo"),
+                ivb=pd_g.get("ivb"),
+                hb_arm_positive=pd_g.get("hb"),
+                spin_rate=pd_g.get("spin_rate"),
+                rel_height=rel_height,
+                rel_side_arm=rel_side_arm,
+                extension=extension,
+                hand=hand,
+                is_same_hand=is_same_hand_flag,
+            )
+            if row is None:
+                continue
+            X = pd.DataFrame([row], columns=feat_names)
+            per_group[grp] = float(model.predict(X)[0])
+        per_group_by_stand[stand_code] = per_group
+        # Additive structural: arsenal = Σ usage_g × per_group_pred_g
+        u_sum = sum(usages.get(g, 0.0) for g in per_group) or 1.0
+        out_per_stand[stand_code] = sum(
+            usages.get(g, 0.0) / u_sum * per_group[g] for g in per_group
+        )
+    if not out_per_stand:
+        return None, {}, 0.0
+    # Pairwise tunneling correction (avg over stands)
+    lam_R = float(_usage_v3b.get("tunnel_lambda_vs_RHB", 0.0))
+    lam_L = float(_usage_v3b.get("tunnel_lambda_vs_LHB", 0.0))
+    lam_avg = (lam_R + lam_L) / 2.0
+    sigmas = _usage_v3b.get("tunnel_sigmas", {})
+    sig_v = float(sigmas.get("velo", 6.0))
+    sig_i = float(sigmas.get("ivb",  8.0))
+    sig_h = float(sigmas.get("hb",   8.0))
+    tunnel_sum = 0.0
+    grps = list(pitches_dict.keys())
+    for i in range(len(grps)):
+        for j in range(i + 1, len(grps)):
+            g_i, g_j = grps[i], grps[j]
+            u_i = usages.get(g_i, 0.0); u_j = usages.get(g_j, 0.0)
+            if u_i <= 0 or u_j <= 0: continue
+            v_i = float(pitches_dict[g_i].get("velo") or 90.0)
+            v_j = float(pitches_dict[g_j].get("velo") or 90.0)
+            i_i = float(pitches_dict[g_i].get("ivb")  or 0.0)
+            i_j = float(pitches_dict[g_j].get("ivb")  or 0.0)
+            h_i = float(pitches_dict[g_i].get("hb")   or 0.0)
+            h_j = float(pitches_dict[g_j].get("hb")   or 0.0)
+            k = (
+                np.exp(-0.5 * ((v_i - v_j) / sig_v) ** 2)
+                * np.exp(-0.5 * ((i_i - i_j) / sig_i) ** 2)
+                * np.exp(-0.5 * ((h_i - h_j) / sig_h) ** 2)
+            )
+            tunnel_sum += 2.0 * u_i * u_j * k
+    tunnel_corr = lam_avg * tunnel_sum
+    pred_avg = (sum(out_per_stand.values()) / len(out_per_stand)) + tunnel_corr
+    # Per-group output: average of R and L per-pitch predictions
+    per_group_avg = {}
+    all_groups = set(per_group_by_stand["R"]) | set(per_group_by_stand["L"])
+    for g in all_groups:
+        vals = []
+        if g in per_group_by_stand["R"]: vals.append(per_group_by_stand["R"][g])
+        if g in per_group_by_stand["L"]: vals.append(per_group_by_stand["L"][g])
+        per_group_avg[g] = sum(vals) / len(vals)
+    return pred_avg, per_group_avg, tunnel_corr
+
+
+def _v3b_suggest_usage(pitches_dict, rel_height, rel_side_arm, extension, hand,
+                         current_usages=None, n_suggestions=5,
+                         deltas_pp=(5, 10, 15, 20)):
+    """Generate usage-change suggestions using the v3b structural model.
+
+    Strategy: hold shapes fixed, perturb a single pitch's usage by
+    ±delta percentage points, renormalize others proportionally,
+    re-score. Rank by predicted arsenal outcome gain.
+
+    Returns list of dicts:
+      {group, direction (+/−), delta_pp, from_pct, to_pct, predicted_gain}
+    sorted by predicted_gain desc.
+    """
+    if _usage_v3b is None or not pitches_dict:
+        return []
+    # Default current usages: prefer user-entered, fall back to MLB typical
+    if current_usages is None:
+        current_usages = {}
+        for g, pd_g in pitches_dict.items():
+            u = pd_g.get("usage_pct")
+            if u is None:
+                u = _MLB_USAGE_FALLBACK.get(g, 15.0)
+            current_usages[g] = float(u) / 100.0  # → fraction
+    # Normalize current to sum to 1
+    s = sum(current_usages.values()) or 1.0
+    cur = {g: v / s for g, v in current_usages.items()}
+    base_pred, _, _ = _v3b_predict_arsenal(
+        pitches_dict, rel_height, rel_side_arm, extension, hand, cur
+    )
+    if base_pred is None:
+        return []
+    candidates = []
+    for grp in pitches_dict:
+        cur_u = cur.get(grp, 0.0)
+        for d_pp in deltas_pp:
+            for sign in (+1, -1):
+                d_frac = sign * d_pp / 100.0
+                new_u = cur_u + d_frac
+                # Realism bounds
+                if new_u < 0.03 or new_u > 0.65: continue
+                others = [g for g in cur if g != grp]
+                other_total = sum(cur[g] for g in others)
+                if other_total < 0.05: continue
+                # Renormalize others to fill (1 - new_u)
+                new_usages = {grp: new_u}
+                for g in others:
+                    new_usages[g] = cur[g] * (1 - new_u) / other_total
+                # Don't let any other go below 0.02
+                if min(new_usages[g] for g in others) < 0.02: continue
+                new_pred, _, _ = _v3b_predict_arsenal(
+                    pitches_dict, rel_height, rel_side_arm, extension, hand, new_usages
+                )
+                if new_pred is None: continue
+                gain = new_pred - base_pred
+                if gain <= 0.005: continue   # noise floor
+                candidates.append({
+                    "group":          grp,
+                    "direction":      "+" if sign > 0 else "−",
+                    "delta_pp":       d_pp,
+                    "from_pct":       cur_u * 100.0,
+                    "to_pct":         new_u * 100.0,
+                    "predicted_gain": float(gain),
+                })
+    candidates.sort(key=lambda c: -c["predicted_gain"])
+    # Keep at most one suggestion per (group, direction)
+    seen = set()
+    out = []
+    for c in candidates:
+        key = (c["group"], c["direction"])
+        if key in seen: continue
+        seen.add(key)
+        out.append(c)
+        if len(out) >= n_suggestions: break
+    return out
+
+
 
 # Median values for v5 features — used to fill missing inputs at scoring time.
 # Calibrated to 2017–2025 Statcast medians.
@@ -6950,6 +7254,133 @@ elif st.session_state.screen == "dmstuff":
                             f"color:#5a3a3a;padding:8px'>Movement plot unavailable: {_C['plot_error']}</div>",
                             unsafe_allow_html=True,
                         )
+
+                    # ── Model-Based Usage Recommendations (v3b) ──────────────────
+                    # Uses the trained usage-outcome model to suggest specific
+                    # usage shifts. The model has MoM sign agreement of ~60%
+                    # (vs 50% random), so directions are meaningful but
+                    # magnitudes carry uncertainty.
+                    if _USAGE_V3B_AVAILABLE:
+                        st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+                        st.markdown(
+                            "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
+                            f"color:{_BRAND_GOLD};letter-spacing:2px;text-transform:uppercase;"
+                            "margin:0 0 4px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
+                            "● Model-Based Usage Recommendations "
+                            "<span style='color:#3a5a78;font-size:9px;font-weight:400;letter-spacing:1px'>"
+                            "(v3b — within-pitcher signal)</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                        # Confidence disclaimer
+                        st.markdown(
+                            "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                            "color:#5a7a90;margin:0 0 12px 0;padding:10px 14px;"
+                            "background:#0a1218;border:1px solid #1a2a40;border-radius:6px;"
+                            "line-height:1.7'>"
+                            "Predictions trained on per-pitch outcomes 2017–2025, controlling for "
+                            "batter quality, pitcher identity, count state, and within-pitcher month-to-month "
+                            "shifts. <b style='color:#a0c0d4'>Sign accuracy ~60%</b> "
+                            "(vs 50% random); pitcher-disjoint R² ≈ 0.27. "
+                            "Use the directions as a coaching hypothesis, not a precise prescription."
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        try:
+                            _v3b_pdict_for_pred = _pdict   # already arm-side-positive HB
+                            _v3b_cur_usage = {}
+                            for _g in _v3b_pdict_for_pred:
+                                _u = _v3b_pdict_for_pred[_g].get("usage_pct")
+                                if _u is None:
+                                    # MLB-typical fallback for ranking purposes
+                                    _u = _MLB_USAGE_FALLBACK.get(_g, 15.0)
+                                _v3b_cur_usage[_g] = float(_u) / 100.0
+                            _v3b_suggestions = _v3b_suggest_usage(
+                                pitches_dict=_v3b_pdict_for_pred,
+                                rel_height=_c_rh,
+                                rel_side_arm=_c_rs,
+                                extension=_c_ext,
+                                hand=_hcode,
+                                current_usages=_v3b_cur_usage,
+                                n_suggestions=5,
+                            )
+
+                            if not _v3b_suggestions:
+                                st.markdown(
+                                    "<div style='font-family:JetBrains Mono,monospace;font-size:11px;"
+                                    "color:#5a7a90;padding:12px 0'>"
+                                    "Model finds no usage changes that improve predicted arsenal outcome."
+                                    " Your current usage mix may already be near-optimal for this shape profile."
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
+                            else:
+                                # Render each suggestion as a row
+                                # Predicted gain is on z-score scale; rough conversion to
+                                # Stuff+-style units: gain × 13 ≈ Stuff+ points
+                                # (composite target sd ≈ 0.76; Stuff+ unit = 10 z-points → ~13)
+                                for _rank, _sug in enumerate(_v3b_suggestions, 1):
+                                    _grp_v3b = _sug["group"]
+                                    _dir = _sug["direction"]
+                                    _from = _sug["from_pct"]
+                                    _to = _sug["to_pct"]
+                                    _gain_z = _sug["predicted_gain"]
+                                    _gain_sp = _gain_z * 13.0
+                                    _color_v3b = PITCH_COLORS.get(_grp_v3b, "#aaaaaa")
+                                    _arrow = "↑" if _dir == "+" else "↓"
+                                    _dir_word = "Increase" if _dir == "+" else "Decrease"
+                                    # Gain color: scale by magnitude
+                                    if _gain_sp >= 2.0:
+                                        _gain_color = _BRAND_GOLD
+                                    elif _gain_sp >= 1.0:
+                                        _gain_color = "#a0c0d4"
+                                    else:
+                                        _gain_color = "#8a9aac"
+                                    st.markdown(
+                                        f"<div style='display:flex;align-items:center;gap:14px;"
+                                        f"padding:12px 18px;margin-bottom:6px;"
+                                        f"background:linear-gradient(165deg,#0e1828,#0a1218);"
+                                        f"border-left:3px solid {_color_v3b};border-radius:6px'>"
+                                        f"<div style='font-family:Inter,sans-serif;font-size:18px;"
+                                        f"font-weight:800;color:{_color_v3b};min-width:30px'>"
+                                        f"{_arrow}</div>"
+                                        f"<div style='flex:1'>"
+                                        f"<div style='font-family:Inter,sans-serif;font-size:13px;"
+                                        f"font-weight:700;color:#c8d8e8'>"
+                                        f"{_dir_word} <span style='color:{_color_v3b}'>{_grp_v3b}</span> usage"
+                                        f"</div>"
+                                        f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                                        f"color:#5a7a90;margin-top:3px'>"
+                                        f"{_from:.0f}% → {_to:.0f}%  &nbsp;·&nbsp;  "
+                                        f"shift {_sug['delta_pp']}pp"
+                                        f"</div></div>"
+                                        f"<div style='text-align:right'>"
+                                        f"<div style='font-family:Inter,sans-serif;font-size:15px;"
+                                        f"font-weight:700;color:{_gain_color}'>"
+                                        f"≈ +{_gain_sp:.1f} Stuff+"
+                                        f"</div>"
+                                        f"<div style='font-family:JetBrains Mono,monospace;font-size:9px;"
+                                        f"color:#5a7a90'>est. (±{abs(_gain_sp)*0.7:.1f})</div>"
+                                        f"</div></div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                # Inline notes
+                                st.markdown(
+                                    "<div style='font-family:JetBrains Mono,monospace;font-size:9px;"
+                                    "color:#3a5a78;margin-top:6px;padding:0 4px;line-height:1.6'>"
+                                    "Δ ranks suggestions by predicted arsenal-outcome lift, holding "
+                                    "shape &amp; release fixed. Magnitudes are converted from z-score "
+                                    "(model's native scale) to Stuff+ units (×13). The ± band reflects "
+                                    "the ~⅓ residual variance the model can't account for."
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        except Exception as _v3b_err:
+                            st.markdown(
+                                f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                                f"color:#5a3a3a;padding:8px'>Usage model unavailable: {_v3b_err}</div>",
+                                unsafe_allow_html=True,
+                            )
 
                     # ── Top 5 Improvement Suggestions ────────────────────────────
                     st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
