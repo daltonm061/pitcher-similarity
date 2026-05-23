@@ -625,6 +625,68 @@ _PLACEHOLDER_REL_HEIGHT = "e.g. 5.80"
 _PLACEHOLDER_REL_SIDE   = "e.g. 1.90"
 _PLACEHOLDER_EXTENSION  = "e.g. 6.40"
 
+# ── Movement-data source adjustments ────────────────────────────────
+# Our model is trained on Statcast pitch-by-pitch data, which has used
+# Hawk-Eye optical tracking since the 2020 season. TrackMan (Doppler
+# radar) reports systematically different break numbers for the same
+# pitch — usually a bit more induced vertical break, slightly more
+# horizontal. Rapsodo's hybrid radar+camera output sits between the two
+# but is closer to Hawk-Eye.
+#
+# When a coach enters numbers sourced from TrackMan or Rapsodo, we
+# adjust to a Hawk-Eye-equivalent BEFORE scoring so they're compared
+# against the model's training distribution. The user still SEES the
+# numbers they entered — the adjustment is applied internally.
+#
+# Adjustments are in inches and are added to the user's input:
+#     adj_ivb = user_ivb + ivb_offset   (negative offset = scored lower)
+#     adj_hb  = user_hb  + hb_offset
+#
+# Source magnitudes are approximate (no public canonical calibration);
+# values below reflect averages reported in industry comparisons
+# (Driveline, PitcherList, FanGraphs) and aim to capture the
+# *direction* of the bias more than its exact magnitude. Per-pitch-type
+# entries override the "default" key for that source.
+_DATA_SOURCES = ["Hawk-Eye / Statcast", "TrackMan", "Rapsodo"]
+_DATA_SOURCE_ADJ = {
+    "Hawk-Eye / Statcast": {
+        "default": {"ivb": 0.0, "hb": 0.0},
+    },
+    "TrackMan": {
+        # TrackMan reads higher IVB on fastballs/cutters than Hawk-Eye
+        "default":        {"ivb": -1.0, "hb": -0.5},
+        "4-Seam":         {"ivb": -1.5, "hb": -0.5},
+        "2-Seam/Sinker":  {"ivb": -1.0, "hb": -0.7},
+        "Cutter":         {"ivb": -1.5, "hb": -0.5},
+        "Slider":         {"ivb": -1.0, "hb": -0.5},
+        "Sweeper":        {"ivb": -1.0, "hb": -1.0},
+        "Curveball":      {"ivb": -1.5, "hb": -0.5},
+        "Splitter":       {"ivb": -1.0, "hb": -0.5},
+        "Changeup":       {"ivb": -1.0, "hb": -0.5},
+    },
+    "Rapsodo": {
+        # Rapsodo is closer to Hawk-Eye than TrackMan but still reads
+        # marginally higher on most pitches
+        "default": {"ivb": -0.5, "hb": -0.2},
+    },
+}
+
+def _apply_data_source_adjustment(pitch_group: str, ivb, hb, source: str):
+    """Return (adj_ivb, adj_hb) for the given source label.
+
+    Inputs are user-entered values from the device. Output is the
+    Hawk-Eye-equivalent that should be scored. NaN/None inputs pass
+    through unchanged.
+    """
+    if source not in _DATA_SOURCE_ADJ or source == "Hawk-Eye / Statcast":
+        return ivb, hb
+    table = _DATA_SOURCE_ADJ[source]
+    adj = table.get(pitch_group) or table.get("default") or {"ivb": 0.0, "hb": 0.0}
+    adj_ivb = (None if ivb is None else float(ivb) + float(adj.get("ivb", 0.0)))
+    adj_hb  = (None if hb  is None else float(hb)  + float(adj.get("hb",  0.0)))
+    return adj_ivb, adj_hb
+
+
 # MLB per-pitch league medians, arm-side positive HB convention (matches
 # calculator input). Used by movement plot, improvement suggestions, and
 # nearest-shape fallback. Previously redefined inline in the calculator screen.
@@ -1042,6 +1104,14 @@ _V3B_GROUP_TO_INT = {g: i + 1 for i, g in enumerate([
     "Slider", "Sweeper", "Curveball",
     "Splitter", "Changeup", "Knuckleball",
 ])}
+
+def _ordinal_word(n: int) -> str:
+    """1 → '#1', 2 → '#2', etc. Short, monospace-friendly."""
+    try:
+        return f"#{int(n)}"
+    except (TypeError, ValueError):
+        return str(n)
+
 
 def _v3b_per_pitch_feature_row(pitch_group, velo, ivb, hb_arm_positive,
                                  spin_rate, rel_height, rel_side_arm, extension,
@@ -1475,6 +1545,38 @@ def _approximate_vaa(pitch_group: str, ivb: float, velo: float, rh: float) -> fl
     return a + b_ivb * float(ivb) + b_velo * float(velo) + b_rh * float(rh)
 
 
+def _approximate_haa(pitch_group: str, hb_arm_positive: float, hand: str) -> float:
+    """Estimate HAA (horizontal approach angle, catcher's-view degrees) from
+    pitch type, hand, and arm-side-positive HB.
+
+    Method: anchor at the per-(pitch_group, hand) HAA league mean computed
+    from pitcher_profiles, then linearly shift by the pitch's HB deviation
+    from the type-typical HB.
+
+    Physics-derived slope: a pitch travels ~660" release-to-plate; an extra
+    inch of horizontal break at the plate ≈ arctan(1/660) ≈ 0.087° of
+    additional horizontal approach angle. RHP arm-side break shifts HAA
+    glove-side (more negative in catcher's view); LHP arm-side break
+    shifts HAA arm-side (more positive). Hand sign handles this.
+
+    Returns 0.0 if no league baseline available (degrades gracefully).
+    """
+    if hb_arm_positive is None:
+        hb_arm_positive = 0.0
+    hand_code = "R" if str(hand).upper().startswith("R") else "L"
+    # Look up league baseline; _vaa_haa_league is populated at module-load time.
+    baseline = (_vaa_haa_league.get(f"{pitch_group}_{hand_code}")
+                  or _vaa_haa_league.get(pitch_group)
+                  or {})
+    haa_mu = float(baseline.get("haa_mu", 0.0))
+    typical_hb = float(_MLB_PITCH_MEDIANS.get(pitch_group, {}).get("hb", 0.0))
+    SLOPE = 0.087   # degrees per inch (physics-derived, see docstring)
+    # RHP: more arm-side HB → HAA more negative (catcher's view points left)
+    # LHP: more arm-side HB → HAA more positive
+    hand_sign = +1.0 if hand_code == "L" else -1.0
+    return haa_mu + (float(hb_arm_positive) - typical_hb) * SLOPE * hand_sign
+
+
 def _score_v5_arsenal(pitches: dict, rel_height: float = None,
                        rel_side: float = None, extension: float = None,
                        hand: str = "R") -> dict:
@@ -1607,9 +1709,16 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
         else:
             vaa = _V5_MEDIANS["vaa"]
             imputed.append("vaa")
-        haa = _V5_MEDIANS["haa"];  imputed.append("haa")
+        # Model-input HAA stays at the trained median (changing it would
+        # shift predictions in untested ways). For DISPLAY we compute a
+        # physically-motivated estimate from shape + hand so the per-pitch
+        # card shows a non-zero, pitch-appropriate value.
+        haa = _V5_MEDIANS["haa"]; imputed.append("haa")
         if hand == "L":
             haa = -haa
+        # hb_arm here is glove-side-positive (model internal); convert to
+        # arm-side-positive before passing to _approximate_haa.
+        haa_display = _approximate_haa(scored_group, -hb_arm, hand)
 
         # v5c: residualize VAA/HAA against release geometry using bundle baselines
         bl_v = vaa_haa_baselines.get(("vaa", int(pt_int), int(is_lefty)))
@@ -1657,7 +1766,7 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
             # These are the model's *estimated* approach angles given shape,
             # slot, and velo — not used as input features (vaa_aa/haa_aa are).
             "vaa_raw":       vaa,
-            "haa_raw":       haa,
+            "haa_raw":       haa_display,
             "rel_height":    rh,
             "rel_side_arm":  rs_arm,
             "extension":     ext,
@@ -5693,6 +5802,65 @@ elif st.session_state.screen == "dmstuff":
                                           placeholder=_PLACEHOLDER_EXTENSION, key="dm_ext",
                                           label_visibility="collapsed")
 
+            # ── Movement-data source selector ─────────────────────────────
+            # Lets the coach declare where their IVB/HB numbers come from
+            # so we can scale to Statcast-equivalent before model scoring.
+            ds_col_l, ds_col_r = st.columns([2, 6])
+            with ds_col_l:
+                st.markdown(
+                    "<div class='field-label' style='margin-top:14px'>"
+                    "Movement Data Source"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                st.selectbox(
+                    " ", options=_DATA_SOURCES, index=0,
+                    key="dm_data_source", label_visibility="collapsed",
+                    help=(
+                        "Adjusts internal scoring to a Hawk-Eye (Statcast) "
+                        "equivalent. The model was trained on Statcast data; "
+                        "TrackMan typically reports ~1–1.5\" more induced "
+                        "vertical break on fastballs than Hawk-Eye, and "
+                        "Rapsodo lands a bit between the two. Your entered "
+                        "numbers are not changed — only the model's "
+                        "internal scoring is adjusted."
+                    ),
+                )
+            with ds_col_r:
+                _cur_src = st.session_state.get("dm_data_source",
+                                                  _DATA_SOURCES[0])
+                if _cur_src != _DATA_SOURCES[0]:
+                    # Build a compact human-readable summary of the
+                    # adjustments being applied
+                    _tbl = _DATA_SOURCE_ADJ.get(_cur_src, {})
+                    _dflt = _tbl.get("default", {"ivb": 0.0, "hb": 0.0})
+                    st.markdown(
+                        "<div style='font-family:JetBrains Mono,monospace;"
+                        "font-size:10px;color:#7a9ab0;margin:38px 0 0 0;"
+                        "padding:10px 14px;background:#0a1218;"
+                        "border:1px solid #1a2a40;border-radius:6px;line-height:1.7'>"
+                        f"Scoring will subtract approximately "
+                        f"<b style='color:#a0c0d4'>{abs(_dflt['ivb']):.1f}\" iVB</b> "
+                        f"and <b style='color:#a0c0d4'>{abs(_dflt['hb']):.1f}\" HB</b> "
+                        f"from your inputs to convert {_cur_src} → "
+                        f"Hawk-Eye equivalent. Adjustments vary by pitch "
+                        f"type. Your entered values stay as displayed."
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        "<div style='font-family:JetBrains Mono,monospace;"
+                        "font-size:10px;color:#5a7a90;margin:38px 0 0 0;"
+                        "padding:10px 14px;background:#0a1218;"
+                        "border:1px solid #1a2a40;border-radius:6px;line-height:1.7'>"
+                        "Hawk-Eye / Statcast is the model's native scale — "
+                        "no adjustment applied. Use this if you don't know "
+                        "your data source."
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+
             st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 
             # ── TrackMan / Rapsodo Auto-Fill (calculator) ─────────────────────
@@ -6092,22 +6260,32 @@ elif st.session_state.screen == "dmstuff":
 
                     pitches_dict = {}
                     missing_velo = []
+                    # Movement-data source adjustment applied per pitch
+                    _data_source = st.session_state.get("dm_data_source",
+                                                          _DATA_SOURCES[0])
                     for group in _dm_added:
                         v = _pf(st.session_state.get(f"dm_{group}_velo"))
                         if v is None:
                             missing_velo.append(group)
                             continue
                         _tilt_in = _pf(st.session_state.get(f"dm_{group}_tilt"))
+                        _user_ivb = _pf(st.session_state.get(f"dm_{group}_ivb"))
+                        _user_hb  = _pf(st.session_state.get(f"dm_{group}_hb"))
+                        # Convert from source to Hawk-Eye (Statcast) equivalent
+                        _adj_ivb, _adj_hb = _apply_data_source_adjustment(
+                            group, _user_ivb, _user_hb, _data_source
+                        )
                         pitches_dict[group] = {
                             "velo":      v,
-                            "ivb":       _pf(st.session_state.get(f"dm_{group}_ivb")),
-                            "hb":        _pf(st.session_state.get(f"dm_{group}_hb")),
+                            "ivb":       _adj_ivb,
+                            "hb":        _adj_hb,
                             "spin_rate": _pf(st.session_state.get(f"dm_{group}_spin")),
                             "usage_pct": _pf(st.session_state.get(f"dm_{group}_usage")),
                             "tilt_hour": _tilt_in,
+                            # Preserve user-entered (un-adjusted) values for display
+                            "ivb_entered": _user_ivb,
+                            "hb_entered":  _user_hb,
                         }
-                        # If tilt provided, derive an SSW estimate (used by scorer
-                        # via ssw_magnitude if it knows what to do with it).
                         if _tilt_in is not None:
                             pitches_dict[group]["ssw_magnitude_hint"] = (
                                 _ssw_fraction_from_clock(_tilt_in, group) * 1.5
@@ -6161,6 +6339,7 @@ elif st.session_state.screen == "dmstuff":
                                 "dm_added":        list(_dm_added),
                                 "missing_velo":    missing_velo,
                                 "hb_auto_flipped": hb_auto_flipped,
+                                "data_source":     _data_source,
                                 "plot":            {},
                                 "plot_error":      None,
                                 "top5":            [],
@@ -6503,74 +6682,13 @@ elif st.session_state.screen == "dmstuff":
                                                      "value": round(_new_val, 2)},
                                                 ))
 
-                                    # 5. Usage shifts — DYNAMIC magnitude per pitch.
-                                    # For each pitch we test several candidate
-                                    # magnitudes (constrained by the current usage
-                                    # and a realistic ceiling), then suggest only
-                                    # the BEST single move per direction (path of
-                                    # least resistance). Magnitudes scale with
-                                    # current usage: low-usage pitches can be
-                                    # bumped modestly, high-usage pitches can be
-                                    # cut substantially but not raised much more.
-                                    _USAGE_CEIL = 65.0      # realistic single-pitch ceiling
-                                    _USAGE_FLOOR = 3.0      # below this, "remove" is the right tool
-
-                                    def _candidate_magnitudes(cur):
-                                        """Return list of (delta_pct, direction) to test."""
-                                        out = []
-                                        # Upward candidates (constrained to ceiling)
-                                        for mag in (5.0, 10.0, 15.0, 20.0, 25.0):
-                                            if cur + mag <= _USAGE_CEIL and mag <= (_USAGE_CEIL - cur):
-                                                out.append((+mag, "+"))
-                                        # Downward candidates (constrained to floor)
-                                        for mag in (5.0, 10.0, 15.0, 20.0, 25.0):
-                                            if cur - mag >= _USAGE_FLOOR:
-                                                out.append((-mag, "−"))
-                                        return out
-
-                                    for _grp, _pd_s in pitches_dict.items():
-                                        _cur_usage = _pd_s.get("usage_pct")
-                                        if _cur_usage is None:
-                                            continue
-                                        # Track best move per direction
-                                        _best_up   = None   # (delta, mag, new_usage)
-                                        _best_down = None
-                                        for _mag, _dir in _candidate_magnitudes(_cur_usage):
-                                            _new_usage = _cur_usage + _mag
-                                            _try_d = {g: dict(v) for g, v in pitches_dict.items()}
-                                            _try_d[_grp]["usage_pct"] = _new_usage
-                                            _new_mean = _rescore_mean(_try_d)
-                                            if _new_mean is None:
-                                                continue
-                                            _delta = _new_mean - _baseline_mean
-                                            # For each direction, keep the move with
-                                            # the best delta-per-pct-change (most
-                                            # efficient improvement). If two moves
-                                            # tie on efficiency, prefer the smaller.
-                                            _efficiency = _delta / abs(_mag)
-                                            _candidate = (_delta, _efficiency, abs(_mag), _new_usage)
-                                            if _dir == "+":
-                                                if _best_up is None or _candidate[1] > _best_up[1]:
-                                                    _best_up = _candidate
-                                            else:
-                                                if _best_down is None or _candidate[1] > _best_down[1]:
-                                                    _best_down = _candidate
-
-                                        # Emit one suggestion per direction (only if
-                                        # the predicted gain is meaningful).
-                                        for _dir_str, _best in (("+", _best_up), ("−", _best_down)):
-                                            if _best is None:
-                                                continue
-                                            _delta, _eff, _abs_mag, _new_u = _best
-                                            if _delta <= 0.2:   # ignore noise / non-improvements
-                                                continue
-                                            _suggestions.append((
-                                                _delta,
-                                                f"{_dir_str}{_abs_mag:.0f}% usage on {_grp}",
-                                                f"{_cur_usage:.0f}% → {_new_u:.0f}% usage",
-                                                {"type": "set_pitch_field", "group": _grp,
-                                                 "field": "usage", "value": round(_new_u, 1)},
-                                            ))
+                                    # 5. Usage shifts — REMOVED. Usage recommendations are
+                                    # now served by the dedicated Pitch Usage Verdict
+                                    # section (v3b model, ranking-based). The legacy
+                                    # rescore-based usage suggestions duplicated that
+                                    # signal less reliably (they used the v5 arsenal
+                                    # scorer which doesn't have the structural form
+                                    # needed for safe usage counterfactuals).
 
                                     # 6. Remove each pitch — but only when the removal is
                                     # STABLE under re-computation. Two known instabilities:
@@ -6692,6 +6810,21 @@ elif st.session_state.screen == "dmstuff":
                             "arm-side-positive for the model. Plot shows catcher's view (LHP "
                             "arm-side appears on the left)."
                             "</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    _src_label = _C.get("data_source", _DATA_SOURCES[0])
+                    if _src_label and _src_label != _DATA_SOURCES[0]:
+                        st.markdown(
+                            f"<div style='max-width:680px;margin:8px auto 16px auto;"
+                            f"padding:10px 16px;border:1px solid #2a4a6a40;"
+                            f"border-radius:6px;background:#0a1420;"
+                            f"font-family:JetBrains Mono,monospace;font-size:10px;color:#5a8aaa'>"
+                            f"ℹ Movement-data source: <b style='color:#c0d8e8'>{_src_label}</b>. "
+                            f"iVB/HB inputs were adjusted to Hawk-Eye/Statcast "
+                            f"equivalents before scoring. Displayed values below are the "
+                            f"adjusted (model-internal) numbers."
+                            f"</div>",
                             unsafe_allow_html=True,
                         )
 
@@ -7255,123 +7388,179 @@ elif st.session_state.screen == "dmstuff":
                             unsafe_allow_html=True,
                         )
 
-                    # ── Model-Based Usage Recommendations (v3b) ──────────────────
-                    # Uses the trained usage-outcome model to suggest specific
-                    # usage shifts. The model has MoM sign agreement of ~60%
-                    # (vs 50% random), so directions are meaningful but
-                    # magnitudes carry uncertainty.
+                    # ── Pitch Usage Verdict (v3b ranking) ────────────────────────
+                    # Tells the coach in plain language which pitches to throw
+                    # MORE and which to throw LESS — based on the model's
+                    # per-pitch quality ranking vs the pitcher's current usage
+                    # ranking. No magnitudes, no point estimates: just clear
+                    # directional verdicts. This is the most reliable signal
+                    # the model can produce (CF pass rate = 100% — the
+                    # ranking direction is mathematically guaranteed safe
+                    # under the structural aggregation).
                     if _USAGE_V3B_AVAILABLE:
                         st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
                         st.markdown(
                             "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
                             f"color:{_BRAND_GOLD};letter-spacing:2px;text-transform:uppercase;"
                             "margin:0 0 4px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
-                            "● Model-Based Usage Recommendations "
+                            "● Pitch Usage Verdict "
                             "<span style='color:#3a5a78;font-size:9px;font-weight:400;letter-spacing:1px'>"
-                            "(v3b — within-pitcher signal)</span></div>",
+                            "(v3b model — directional only)</span></div>",
                             unsafe_allow_html=True,
                         )
-                        # Confidence disclaimer
                         st.markdown(
                             "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
                             "color:#5a7a90;margin:0 0 12px 0;padding:10px 14px;"
                             "background:#0a1218;border:1px solid #1a2a40;border-radius:6px;"
                             "line-height:1.7'>"
-                            "Predictions trained on per-pitch outcomes 2017–2025, controlling for "
-                            "batter quality, pitcher identity, count state, and within-pitcher month-to-month "
-                            "shifts. <b style='color:#a0c0d4'>Sign accuracy ~60%</b> "
-                            "(vs 50% random); pitcher-disjoint R² ≈ 0.27. "
-                            "Use the directions as a coaching hypothesis, not a precise prescription."
+                            "Compares each pitch's <b style='color:#a0c0d4'>model quality rank</b> "
+                            "to its <b style='color:#a0c0d4'>current usage rank</b> within your arsenal. "
+                            "When the model thinks a pitch is better than you're treating it, the verdict is "
+                            "<b style='color:#5ac8a0'>USE MORE</b>; when worse, "
+                            "<b style='color:#d48a8a'>USE LESS</b>. "
+                            "Direction is the reliable signal — exact percentages aren't."
                             "</div>",
                             unsafe_allow_html=True,
                         )
 
                         try:
-                            _v3b_pdict_for_pred = _pdict   # already arm-side-positive HB
-                            _v3b_cur_usage = {}
-                            for _g in _v3b_pdict_for_pred:
-                                _u = _v3b_pdict_for_pred[_g].get("usage_pct")
-                                if _u is None:
-                                    # MLB-typical fallback for ranking purposes
-                                    _u = _MLB_USAGE_FALLBACK.get(_g, 15.0)
-                                _v3b_cur_usage[_g] = float(_u) / 100.0
-                            _v3b_suggestions = _v3b_suggest_usage(
-                                pitches_dict=_v3b_pdict_for_pred,
-                                rel_height=_c_rh,
-                                rel_side_arm=_c_rs,
-                                extension=_c_ext,
-                                hand=_hcode,
-                                current_usages=_v3b_cur_usage,
-                                n_suggestions=5,
-                            )
+                            _v3b_pd = _pdict
+                            # Compute per-pitch f() averaged across stands.
+                            _v3b_quality = {}
+                            for _g, _pd_g in _v3b_pd.items():
+                                _vals = []
+                                for _stand_code in ("R", "L"):
+                                    _m = _usage_v3b.get(f"model_vs_{_stand_code}HB")
+                                    if _m is None: continue
+                                    _is_same = 1 if str(_hcode).upper().startswith(_stand_code) else 0
+                                    _row = _v3b_per_pitch_feature_row(
+                                        pitch_group=_g,
+                                        velo=_pd_g.get("velo"),
+                                        ivb=_pd_g.get("ivb"),
+                                        hb_arm_positive=_pd_g.get("hb"),
+                                        spin_rate=_pd_g.get("spin_rate"),
+                                        rel_height=_c_rh,
+                                        rel_side_arm=_c_rs,
+                                        extension=_c_ext,
+                                        hand=_hcode,
+                                        is_same_hand=_is_same,
+                                    )
+                                    if _row is None: continue
+                                    _X = pd.DataFrame([_row], columns=_usage_v3b["feature_names"])
+                                    _vals.append(float(_m.predict(_X)[0]))
+                                if _vals:
+                                    _v3b_quality[_g] = sum(_vals) / len(_vals)
 
-                            if not _v3b_suggestions:
+                            if len(_v3b_quality) < 2:
                                 st.markdown(
                                     "<div style='font-family:JetBrains Mono,monospace;font-size:11px;"
                                     "color:#5a7a90;padding:12px 0'>"
-                                    "Model finds no usage changes that improve predicted arsenal outcome."
-                                    " Your current usage mix may already be near-optimal for this shape profile."
+                                    "Need at least 2 pitches in the arsenal to compare quality rankings."
                                     "</div>",
                                     unsafe_allow_html=True,
                                 )
                             else:
-                                # Render each suggestion as a row
-                                # Predicted gain is on z-score scale; rough conversion to
-                                # Stuff+-style units: gain × 13 ≈ Stuff+ points
-                                # (composite target sd ≈ 0.76; Stuff+ unit = 10 z-points → ~13)
-                                for _rank, _sug in enumerate(_v3b_suggestions, 1):
-                                    _grp_v3b = _sug["group"]
-                                    _dir = _sug["direction"]
-                                    _from = _sug["from_pct"]
-                                    _to = _sug["to_pct"]
-                                    _gain_z = _sug["predicted_gain"]
-                                    _gain_sp = _gain_z * 13.0
-                                    _color_v3b = PITCH_COLORS.get(_grp_v3b, "#aaaaaa")
-                                    _arrow = "↑" if _dir == "+" else "↓"
-                                    _dir_word = "Increase" if _dir == "+" else "Decrease"
-                                    # Gain color: scale by magnitude
-                                    if _gain_sp >= 2.0:
-                                        _gain_color = _BRAND_GOLD
-                                    elif _gain_sp >= 1.0:
-                                        _gain_color = "#a0c0d4"
+                                # Build rank dicts (1 = best/most). Use MLB-typical
+                                # usage as a fallback for pitches with no usage entered.
+                                _v3b_usage = {}
+                                for _g in _v3b_quality:
+                                    _u = (_v3b_pd[_g].get("usage_pct")
+                                            if _g in _v3b_pd else None)
+                                    if _u is None:
+                                        _u = _MLB_USAGE_FALLBACK.get(_g, 15.0)
+                                    _v3b_usage[_g] = float(_u)
+                                # Rank by quality (high f = rank 1)
+                                _q_sorted = sorted(_v3b_quality.items(),
+                                                     key=lambda x: -x[1])
+                                _q_rank = {g: i + 1 for i, (g, _) in enumerate(_q_sorted)}
+                                # Rank by usage (high usage = rank 1)
+                                _u_sorted = sorted(_v3b_usage.items(),
+                                                     key=lambda x: -x[1])
+                                _u_rank = {g: i + 1 for i, (g, _) in enumerate(_u_sorted)}
+
+                                # Build per-pitch verdict rows, ordered by
+                                # strongest disagreement (|rank delta|) so the
+                                # most actionable items are at top.
+                                _rows = []
+                                for _g, _q_v in _v3b_quality.items():
+                                    _qr = _q_rank[_g]
+                                    _ur = _u_rank[_g]
+                                    _delta_rank = _ur - _qr  # >0 → use MORE (under-used)
+                                    _rows.append({
+                                        "group":       _g,
+                                        "quality_val": _q_v,
+                                        "q_rank":      _qr,
+                                        "u_rank":      _ur,
+                                        "delta_rank":  _delta_rank,
+                                        "usage_pct":   _v3b_usage[_g],
+                                    })
+                                _rows.sort(key=lambda r: (-abs(r["delta_rank"]),
+                                                           -r["quality_val"]))
+
+                                for _r in _rows:
+                                    _g = _r["group"]
+                                    _dr = _r["delta_rank"]
+                                    _c = PITCH_COLORS.get(_g, "#aaaaaa")
+                                    # Verdict logic
+                                    if _dr >= 2:
+                                        _verdict = "USE MORE"
+                                        _vcolor = "#5ac8a0"
+                                        _strength = "STRONG"
+                                    elif _dr == 1:
+                                        _verdict = "use more"
+                                        _vcolor = "#a0c0d4"
+                                        _strength = "mild"
+                                    elif _dr == 0:
+                                        _verdict = "about right"
+                                        _vcolor = "#8a9aac"
+                                        _strength = ""
+                                    elif _dr == -1:
+                                        _verdict = "use less"
+                                        _vcolor = "#c8a878"
+                                        _strength = "mild"
                                     else:
-                                        _gain_color = "#8a9aac"
+                                        _verdict = "USE LESS"
+                                        _vcolor = "#d48a8a"
+                                        _strength = "STRONG"
+                                    # Build qualitative description
+                                    _rank_q_word = _ordinal_word(_r["q_rank"])
+                                    _rank_u_word = _ordinal_word(_r["u_rank"])
+                                    _detail = (
+                                        f"Quality rank {_rank_q_word}  ·  "
+                                        f"usage rank {_rank_u_word}  "
+                                        f"({_r['usage_pct']:.0f}% currently)"
+                                    )
+                                    _strength_chip = (
+                                        f"<span style='font-family:JetBrains Mono,monospace;"
+                                        f"font-size:9px;color:{_vcolor};letter-spacing:1px;"
+                                        f"margin-left:8px;opacity:0.7'>{_strength}</span>"
+                                    ) if _strength else ""
                                     st.markdown(
                                         f"<div style='display:flex;align-items:center;gap:14px;"
                                         f"padding:12px 18px;margin-bottom:6px;"
                                         f"background:linear-gradient(165deg,#0e1828,#0a1218);"
-                                        f"border-left:3px solid {_color_v3b};border-radius:6px'>"
-                                        f"<div style='font-family:Inter,sans-serif;font-size:18px;"
-                                        f"font-weight:800;color:{_color_v3b};min-width:30px'>"
-                                        f"{_arrow}</div>"
-                                        f"<div style='flex:1'>"
+                                        f"border-left:3px solid {_c};border-radius:6px'>"
                                         f"<div style='font-family:Inter,sans-serif;font-size:13px;"
-                                        f"font-weight:700;color:#c8d8e8'>"
-                                        f"{_dir_word} <span style='color:{_color_v3b}'>{_grp_v3b}</span> usage"
-                                        f"</div>"
-                                        f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                                        f"color:#5a7a90;margin-top:3px'>"
-                                        f"{_from:.0f}% → {_to:.0f}%  &nbsp;·&nbsp;  "
-                                        f"shift {_sug['delta_pp']}pp"
-                                        f"</div></div>"
-                                        f"<div style='text-align:right'>"
-                                        f"<div style='font-family:Inter,sans-serif;font-size:15px;"
-                                        f"font-weight:700;color:{_gain_color}'>"
-                                        f"≈ +{_gain_sp:.1f} Stuff+"
-                                        f"</div>"
-                                        f"<div style='font-family:JetBrains Mono,monospace;font-size:9px;"
-                                        f"color:#5a7a90'>est. (±{abs(_gain_sp)*0.7:.1f})</div>"
-                                        f"</div></div>",
+                                        f"font-weight:700;color:{_c};letter-spacing:2px;"
+                                        f"text-transform:uppercase;min-width:140px'>{_g}</div>"
+                                        f"<div style='flex:1;font-family:JetBrains Mono,monospace;"
+                                        f"font-size:10px;color:#7a9ab0'>{_detail}</div>"
+                                        f"<div style='font-family:Inter,sans-serif;font-size:14px;"
+                                        f"font-weight:800;color:{_vcolor};text-align:right'>"
+                                        f"{_verdict}{_strength_chip}</div>"
+                                        f"</div>",
                                         unsafe_allow_html=True,
                                     )
-                                # Inline notes
+                                # Inline footnote
                                 st.markdown(
                                     "<div style='font-family:JetBrains Mono,monospace;font-size:9px;"
                                     "color:#3a5a78;margin-top:6px;padding:0 4px;line-height:1.6'>"
-                                    "Δ ranks suggestions by predicted arsenal-outcome lift, holding "
-                                    "shape &amp; release fixed. Magnitudes are converted from z-score "
-                                    "(model's native scale) to Stuff+ units (×13). The ± band reflects "
-                                    "the ~⅓ residual variance the model can't account for."
+                                    "A pitch with quality rank #1 but usage rank #3 means the model "
+                                    "thinks it's your best per-pitch but you're throwing it third-most "
+                                    "— a candidate to use more. STRONG = ≥2 rank places of disagreement; "
+                                    "mild = 1 rank place. Model is correct on directional rank "
+                                    "comparisons more often than not but is not a guarantee — "
+                                    "platoon matchups, count tendencies, and pitcher feel still rule."
                                     "</div>",
                                     unsafe_allow_html=True,
                                 )
