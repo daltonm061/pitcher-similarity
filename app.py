@@ -6199,27 +6199,74 @@ elif st.session_state.screen == "dmstuff":
                                                      "value": round(_new_val, 2)},
                                                 ))
 
-                                    # 5. Usage ±20 percentage points
+                                    # 5. Usage shifts — DYNAMIC magnitude per pitch.
+                                    # For each pitch we test several candidate
+                                    # magnitudes (constrained by the current usage
+                                    # and a realistic ceiling), then suggest only
+                                    # the BEST single move per direction (path of
+                                    # least resistance). Magnitudes scale with
+                                    # current usage: low-usage pitches can be
+                                    # bumped modestly, high-usage pitches can be
+                                    # cut substantially but not raised much more.
+                                    _USAGE_CEIL = 65.0      # realistic single-pitch ceiling
+                                    _USAGE_FLOOR = 3.0      # below this, "remove" is the right tool
+
+                                    def _candidate_magnitudes(cur):
+                                        """Return list of (delta_pct, direction) to test."""
+                                        out = []
+                                        # Upward candidates (constrained to ceiling)
+                                        for mag in (5.0, 10.0, 15.0, 20.0, 25.0):
+                                            if cur + mag <= _USAGE_CEIL and mag <= (_USAGE_CEIL - cur):
+                                                out.append((+mag, "+"))
+                                        # Downward candidates (constrained to floor)
+                                        for mag in (5.0, 10.0, 15.0, 20.0, 25.0):
+                                            if cur - mag >= _USAGE_FLOOR:
+                                                out.append((-mag, "−"))
+                                        return out
+
                                     for _grp, _pd_s in pitches_dict.items():
                                         _cur_usage = _pd_s.get("usage_pct")
                                         if _cur_usage is None:
                                             continue
-                                        for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
-                                            _new_usage = _cur_usage + _sign * 20.0
-                                            if _new_usage < 0 or _new_usage > 100:
-                                                continue
+                                        # Track best move per direction
+                                        _best_up   = None   # (delta, mag, new_usage)
+                                        _best_down = None
+                                        for _mag, _dir in _candidate_magnitudes(_cur_usage):
+                                            _new_usage = _cur_usage + _mag
                                             _try_d = {g: dict(v) for g, v in pitches_dict.items()}
                                             _try_d[_grp]["usage_pct"] = _new_usage
                                             _new_mean = _rescore_mean(_try_d)
-                                            if _new_mean is not None:
-                                                _delta = _new_mean - _baseline_mean
-                                                _suggestions.append((
-                                                    _delta,
-                                                    f"{_sign_str}20% usage on {_grp}",
-                                                    f"{_new_usage:.0f}% usage",
-                                                    {"type": "set_pitch_field", "group": _grp,
-                                                     "field": "usage", "value": round(_new_usage, 1)},
-                                                ))
+                                            if _new_mean is None:
+                                                continue
+                                            _delta = _new_mean - _baseline_mean
+                                            # For each direction, keep the move with
+                                            # the best delta-per-pct-change (most
+                                            # efficient improvement). If two moves
+                                            # tie on efficiency, prefer the smaller.
+                                            _efficiency = _delta / abs(_mag)
+                                            _candidate = (_delta, _efficiency, abs(_mag), _new_usage)
+                                            if _dir == "+":
+                                                if _best_up is None or _candidate[1] > _best_up[1]:
+                                                    _best_up = _candidate
+                                            else:
+                                                if _best_down is None or _candidate[1] > _best_down[1]:
+                                                    _best_down = _candidate
+
+                                        # Emit one suggestion per direction (only if
+                                        # the predicted gain is meaningful).
+                                        for _dir_str, _best in (("+", _best_up), ("−", _best_down)):
+                                            if _best is None:
+                                                continue
+                                            _delta, _eff, _abs_mag, _new_u = _best
+                                            if _delta <= 0.2:   # ignore noise / non-improvements
+                                                continue
+                                            _suggestions.append((
+                                                _delta,
+                                                f"{_dir_str}{_abs_mag:.0f}% usage on {_grp}",
+                                                f"{_cur_usage:.0f}% → {_new_u:.0f}% usage",
+                                                {"type": "set_pitch_field", "group": _grp,
+                                                 "field": "usage", "value": round(_new_u, 1)},
+                                            ))
 
                                     # 6. Remove each pitch — but only when the removal is
                                     # STABLE under re-computation. Two known instabilities:
@@ -6565,90 +6612,7 @@ elif st.session_state.screen == "dmstuff":
                                     st.markdown(hm_lhb, unsafe_allow_html=True)
                                 st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
-                        # ── Per-pitch radar (#13) ──────────────────────────
-                        # 6-axis hexagon: Velo, IVB, HB, Spin, Slot height, Extension.
-                        # Each axis scaled vs MLB p50/p90 for the specific pitch type.
-                        if "shape_row" in _scores[group]:
-                            with st.expander(f"📡 {group} feature radar (vs MLB peers)",
-                                             expanded=False):
-                                try:
-                                    _sr = _scores[group]["shape_row"]
-                                    _meds_r = _MLB_PITCH_MEDIANS.get(group, {})
-                                    # Per-axis (raw_val, mlb_p50, mlb_p90).
-                                    # Approximate p90s as p50 + a generous spread.
-                                    # IVB/HB use absolute deviation from type p50.
-                                    _axes = [
-                                        ("Velo",   _sr.get("start_speed"),
-                                         _meds_r.get("velo"),       _meds_r.get("velo", 90) + 5),
-                                        ("IVB",    abs((_sr.get("ivb_in") or 0) - _meds_r.get("ivb", 0)),
-                                         2.5, 6.0),
-                                        ("HB",     abs((-(_sr.get("hb_arm_in") or 0)) - _meds_r.get("hb", 0)),
-                                         3.0, 7.0),
-                                        ("Spin",   _sr.get("spin_rate"),
-                                         _meds_r.get("spin_rate"),   (_meds_r.get("spin_rate") or 2200) + 350),
-                                        ("Slot ht", _sr.get("rel_height"),
-                                         5.8,   6.5),
-                                        ("Extension", _sr.get("extension"),
-                                         6.2,   7.0),
-                                    ]
-                                    # Normalize each axis to 0-100 (50 = MLB p50, 100 = p90+)
-                                    _norm_vals = []
-                                    _labels = []
-                                    for name, v, p50, p90 in _axes:
-                                        if v is None or p50 is None or p90 is None or p90 == p50:
-                                            _norm_vals.append(50.0)
-                                        else:
-                                            _norm_vals.append(
-                                                max(0.0, min(100.0,
-                                                    50.0 + (float(v) - float(p50)) /
-                                                    max(1e-6, (float(p90) - float(p50))) * 50.0))
-                                            )
-                                        _labels.append(name)
-                                    # Plotly radar
-                                    _fig_r = go.Figure()
-                                    _fig_r.add_trace(go.Scatterpolar(
-                                        r=_norm_vals + [_norm_vals[0]],
-                                        theta=_labels + [_labels[0]],
-                                        fill="toself",
-                                        line=dict(color=PITCH_COLORS.get(group, "#aaaaaa"), width=2),
-                                        fillcolor=PITCH_COLORS.get(group, "#aaaaaa"),
-                                        opacity=0.35,
-                                        name=group,
-                                    ))
-                                    # MLB p50 reference (constant 50)
-                                    _fig_r.add_trace(go.Scatterpolar(
-                                        r=[50]*(len(_labels)+1),
-                                        theta=_labels + [_labels[0]],
-                                        line=dict(color="#5a7a90", width=1, dash="dash"),
-                                        fill=None, name="MLB p50",
-                                    ))
-                                    _fig_r.update_layout(
-                                        polar=dict(
-                                            bgcolor="#0e1828",
-                                            radialaxis=dict(visible=True, range=[0, 100],
-                                                            color="#5a7a90", gridcolor="#1a2a40",
-                                                            tickfont=dict(size=8)),
-                                            angularaxis=dict(color="#a0c0d4", gridcolor="#1a2a40",
-                                                             tickfont=dict(size=10)),
-                                        ),
-                                        paper_bgcolor="#0c1420",
-                                        plot_bgcolor="#0c1420",
-                                        showlegend=False,
-                                        margin=dict(l=40, r=40, t=20, b=20),
-                                        height=300,
-                                    )
-                                    st.plotly_chart(_fig_r, use_container_width=True,
-                                                    key=f"radar_{group}")
-                                    st.markdown(
-                                        "<div style='font-family:JetBrains Mono,monospace;"
-                                        "font-size:9px;color:#5a7a90;margin-top:-6px'>"
-                                        "50 = MLB median for this pitch type. 100 = ~90th percentile. "
-                                        "Bigger shape = more extreme on multiple dimensions."
-                                        "</div>",
-                                        unsafe_allow_html=True,
-                                    )
-                                except Exception:
-                                    pass
+
 
                     # ── Arsenal Grade ─────────────────────────────────────────────
                     _scored_vals = _C.get("scored_vals", [])
@@ -6844,19 +6808,48 @@ elif st.session_state.screen == "dmstuff":
 
                             # (#12) Nearest-MLB-shape stars — plot the closest
                             # comparable pitcher's IVB/HB as faint stars behind
-                            # the user's dots, so coaches see a real-world comp.
+                            # the user's dots, with the comp's name shown so
+                            # coaches see a real-world reference at a glance.
+                            def _last_name_for_plot(full):
+                                """Extract last name from a 'Last, First' or
+                                'First Last' string for compact plot labels."""
+                                if not full:
+                                    return ""
+                                full = str(full).strip()
+                                if "," in full:
+                                    return full.split(",", 1)[0].strip()
+                                parts = full.split()
+                                return parts[-1] if parts else full
+
                             _has_nn = False
                             for _g in _user_pts_disp:
                                 _nn = _scores.get(_g, {}).get("nearest_pitcher", {})
                                 _nn_ivb = _nn.get("ivb")
                                 _nn_hb  = _nn.get("hb")
+                                _nn_name = _nn.get("name", "")
+                                _nn_year = _nn.get("year", "")
                                 if _nn_ivb is None or _nn_hb is None:
                                     continue
                                 _has_nn = True
                                 _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
-                                _ax.scatter(_plt_sign * _nn_hb, _nn_ivb, s=130,
-                                            color=_c, marker="*", alpha=0.35,
-                                            edgecolors="none", zorder=2)
+                                _star_x = _plt_sign * _nn_hb
+                                _star_y = _nn_ivb
+                                _ax.scatter(_star_x, _star_y, s=160,
+                                            color=_c, marker="*", alpha=0.55,
+                                            edgecolors="white", linewidths=0.6,
+                                            zorder=4)
+                                # Compact label: "Last 'YY" (e.g. "Williams '24")
+                                _last = _last_name_for_plot(_nn_name)
+                                _yr_short = f"'{int(_nn_year) % 100:02d}" if _nn_year else ""
+                                _lbl = (f"{_last} {_yr_short}").strip()
+                                if _lbl:
+                                    _ax.annotate(
+                                        _lbl, (_star_x, _star_y),
+                                        textcoords="offset points", xytext=(6, -10),
+                                        fontsize=7, color=_c, alpha=0.85,
+                                        path_effects=[_pe.withStroke(linewidth=2,
+                                                                      foreground="#0e1828")],
+                                    )
 
                             # (#11) Usage-weighted dot size — primary pitches
                             # dominate visually, show-me pitches stay small.
@@ -6957,108 +6950,6 @@ elif st.session_state.screen == "dmstuff":
                             f"color:#5a3a3a;padding:8px'>Movement plot unavailable: {_C['plot_error']}</div>",
                             unsafe_allow_html=True,
                         )
-
-                    # ── Deception Triangle (#14) ──────────────────────────────
-                    # Plots each pitch in (velo gap from primary FB, movement
-                    # distance from primary FB) space. Pitches far from the FB
-                    # in BOTH dimensions are hard to identify out of the hand.
-                    if len(_pdict) >= 2:
-                        try:
-                            import matplotlib.pyplot as _plt
-                            import matplotlib.patheffects as _pe
-
-                            # Find primary FB (same priority as scorer)
-                            _DT_FB = ["4-Seam", "2-Seam/Sinker", "Cutter"]
-                            _dt_primary = next((g for g in _DT_FB if g in _pdict), None)
-                            if _dt_primary is not None and _pdict[_dt_primary].get("velo"):
-                                _fb_v = float(_pdict[_dt_primary]["velo"])
-                                _fb_i = float(_pdict[_dt_primary].get("ivb") or 0.0)
-                                _fb_h = float(_pdict[_dt_primary].get("hb")  or 0.0)
-
-                                st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-                                st.markdown(
-                                    "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
-                                    "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
-                                    "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
-                                    f"● Deception vs Primary FB ({_dt_primary})</div>",
-                                    unsafe_allow_html=True,
-                                )
-
-                                _fig2, _ax2 = _plt.subplots(figsize=(4, 3.2))
-                                _fig2.patch.set_facecolor("#0c1420")
-                                _ax2.set_facecolor("#0e1828")
-                                for _spine in _ax2.spines.values():
-                                    _spine.set_edgecolor("#1a2a40")
-                                _ax2.tick_params(colors="#5a7a90", labelsize=9)
-                                _ax2.set_xlabel(
-                                    f"Velo gap from {_dt_primary} (mph)",
-                                    color="#5a7a90", fontsize=10,
-                                )
-                                _ax2.set_ylabel(
-                                    "Movement distance from primary FB (in)",
-                                    color="#5a7a90", fontsize=10,
-                                )
-
-                                # Shaded "deception zone" — far in BOTH dimensions
-                                _ax2.axhspan(8, 35, xmin=0.55, xmax=1.0,
-                                             facecolor="#d4a848", alpha=0.08, zorder=0)
-                                _ax2.text(0, 32, "← more deceptive →",
-                                          color="#d4a84880", fontsize=8, ha="left",
-                                          path_effects=[_pe.withStroke(linewidth=2, foreground="#0e1828")])
-                                _ax2.axhline(0, color="#1a2a40", lw=1, zorder=0)
-                                _ax2.axvline(0, color="#1a2a40", lw=1, zorder=0)
-                                _ax2.grid(True, color="#1a2a40", lw=0.5, alpha=0.5, zorder=0)
-                                _ax2.set_xlim(-25, 5)
-                                _ax2.set_ylim(0, 35)
-
-                                # Plot each pitch
-                                for _g, _pd in _pdict.items():
-                                    if _g == _dt_primary:
-                                        continue
-                                    _v = _pd.get("velo")
-                                    _i = _pd.get("ivb")
-                                    _h = _pd.get("hb")
-                                    if _v is None or _i is None or _h is None:
-                                        continue
-                                    _vg = float(_v) - _fb_v
-                                    _md = math.sqrt((float(_i) - _fb_i)**2
-                                                    + (float(_h) - _fb_h)**2)
-                                    _u = _pd.get("usage_pct") or 15.0
-                                    _dot = max(80.0, min(400.0, 80.0 + 3.4 * float(_u)))
-                                    _c = PITCH_COLORS.get(_g, "#aaaaaa")
-                                    _ax2.scatter(_vg, _md, s=_dot, color=_c,
-                                                 edgecolors="white", linewidths=1.2,
-                                                 marker="o", zorder=5)
-                                    _ax2.annotate(_g, (_vg, _md),
-                                                  textcoords="offset points",
-                                                  xytext=(6, 4), fontsize=8, color=_c,
-                                                  path_effects=[_pe.withStroke(linewidth=2,
-                                                                               foreground="#0e1828")])
-                                # Mark the primary FB at origin
-                                _ax2.scatter(0, 0, s=200, color=PITCH_COLORS.get(_dt_primary, "#aaaaaa"),
-                                             marker="s", edgecolors="white", linewidths=1.5,
-                                             zorder=6)
-                                _ax2.annotate(f"{_dt_primary} (anchor)", (0, 0),
-                                              textcoords="offset points",
-                                              xytext=(8, -10), fontsize=8,
-                                              color=PITCH_COLORS.get(_dt_primary, "#aaaaaa"),
-                                              path_effects=[_pe.withStroke(linewidth=2, foreground="#0e1828")])
-
-                                _plt.tight_layout(pad=1.0)
-                                st.pyplot(_fig2, use_container_width=True)
-                                _plt.close(_fig2)
-                                st.markdown(
-                                    "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                                    "color:#3a5a78;margin-top:6px;padding:0 4px;line-height:1.6'>"
-                                    "Pitches in the gold-shaded zone are hardest to identify "
-                                    "out of the hand: large velo separation AND large movement "
-                                    "separation from the primary fastball. Clusters near the "
-                                    "anchor are easier for hitters to read."
-                                    "</div>",
-                                    unsafe_allow_html=True,
-                                )
-                        except Exception as _dt_err:
-                            pass  # deception plot is auxiliary; silent fail OK
 
                     # ── Top 5 Improvement Suggestions ────────────────────────────
                     st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
