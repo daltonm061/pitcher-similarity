@@ -1142,6 +1142,15 @@ def _ordinal_word(n: int) -> str:
         return str(n)
 
 
+# Module-level availability flag so the UI can hide the PDF section
+# when the dependency is missing (deployed envs may not have reportlab).
+try:
+    import reportlab as _rl_check  # noqa: F401
+    _PDF_AVAILABLE = True
+except ImportError:
+    _PDF_AVAILABLE = False
+
+
 def build_calculator_pdf(cache: dict, arsenal_summary: dict = None) -> bytes:
     """Render the calculator's current results into a single-page PDF.
 
@@ -6494,71 +6503,71 @@ elif st.session_state.screen == "dmstuff":
                             unsafe_allow_html=True,
                         )
 
-                # ── PDF export of current results (#20) ───────────────
-                # Lets coaches print or share a one-page report card.
-                if "_dm_cache" in st.session_state:
-                    _C_pdf = st.session_state["_dm_cache"]
-                    _arsenal_summary_pdf = {
-                        "arsenal_sp": _C_pdf.get("display_arsenal_sp"),
-                        "grade":      _C_pdf.get("display_arsenal_grade"),
-                        "vs_rhb":     _C_pdf.get("display_arsenal_vs_rhb"),
-                        "vs_lhb":     _C_pdf.get("display_arsenal_vs_lhb"),
-                    }
-                    _pdf_l, _pdf_r = st.columns([3, 5])
-                    with _pdf_l:
+                # ── Export / Import row ──────────────────────────────
+                # Three actions in a balanced 3-column row:
+                #   1. PDF export of current results       (hidden if reportlab missing)
+                #   2. JSON export of saved arsenals       (hidden if no saves yet)
+                #   3. JSON import of saved arsenals       (always visible)
+                # Columns are equal so the row reads cleanly regardless of
+                # which actions are available this session.
+                _exp_pdf_col, _exp_json_col, _imp_json_col = st.columns([1, 1, 1])
+
+                # PDF export
+                with _exp_pdf_col:
+                    if _PDF_AVAILABLE and "_dm_cache" in st.session_state:
+                        _C_pdf = st.session_state["_dm_cache"]
                         try:
-                            _pdf_bytes = build_calculator_pdf(_C_pdf, _arsenal_summary_pdf)
+                            _pdf_bytes = build_calculator_pdf(_C_pdf, {
+                                "arsenal_sp": _C_pdf.get("display_arsenal_sp"),
+                                "grade":      _C_pdf.get("display_arsenal_grade"),
+                                "vs_rhb":     _C_pdf.get("display_arsenal_vs_rhb"),
+                                "vs_lhb":     _C_pdf.get("display_arsenal_vs_lhb"),
+                            })
                             import time as _time_pdf
                             _pdf_fname = (
                                 f"dm_stuff_report_{_time_pdf.strftime('%Y%m%d_%H%M%S')}.pdf"
                             )
                             st.download_button(
-                                "📄 Export results (PDF)",
+                                "📄  Report (PDF)",
                                 data=_pdf_bytes,
                                 file_name=_pdf_fname,
                                 mime="application/pdf",
                                 key="_dm_export_pdf",
-                                help="Download a one-page PDF of the current "
-                                     "arsenal: grade, per-pitch table, source.",
+                                width="stretch",
+                                help="One-page PDF report of the current "
+                                     "arsenal — grade, per-pitch table, source.",
                             )
                         except Exception as _pdfu_err:
-                            st.warning(f"PDF export unavailable: {_pdfu_err}")
-                    with _pdf_r:
-                        st.markdown(
-                            "<div style='font-family:JetBrains Mono,monospace;"
-                            "font-size:9px;color:#5a7a90;margin-top:14px'>"
-                            "Coaches: print and hand to athlete after a bullpen."
-                            "</div>",
-                            unsafe_allow_html=True,
-                        )
+                            import sys as _sys_pdf
+                            print(f"[pdf] export failed: {_pdfu_err}", file=_sys_pdf.stderr)
 
-                # ── Persistence (Export / Import JSON) ────────────────
-                # Saved arsenals are session-only by default. Download lets
-                # coaches keep tracking across sessions; upload restores.
-                _persist_l, _persist_r = st.columns([2, 2])
-                with _persist_l:
+                # JSON export of saved arsenals
+                with _exp_json_col:
                     if _saved_arsenals:
                         import json as _json_persist
                         _persist_payload = _json_persist.dumps(
                             _saved_arsenals, default=str, indent=2
                         )
                         st.download_button(
-                            "📥 Export saved arsenals (.json)",
+                            "📥  Saved (JSON)",
                             data=_persist_payload,
                             file_name="dm_stuff_saved_arsenals.json",
                             mime="application/json",
                             key="_dm_export_arsenals",
+                            width="stretch",
                             help="Download all saved arsenals so they can be "
                                  "restored in a future session.",
                         )
-                with _persist_r:
+
+                # JSON import of saved arsenals
+                with _imp_json_col:
                     _persist_upload = st.file_uploader(
                         "Import saved arsenals (.json)",
                         type=["json"],
                         key="_dm_import_arsenals",
-                        label_visibility="visible",
-                        help="Replace or merge into the current session's "
-                             "saved arsenals.",
+                        label_visibility="collapsed",
+                        help="Restore previously-exported saved arsenals. "
+                             "Duplicates by label are skipped.",
                     )
                     if _persist_upload is not None:
                         _import_id = f"{_persist_upload.name}_{_persist_upload.size}"
@@ -6569,8 +6578,6 @@ elif st.session_state.screen == "dmstuff":
                                     _persist_upload.read().decode("utf-8")
                                 )
                                 if isinstance(_imp_payload, list):
-                                    # Merge — append imported entries that don't
-                                    # already exist (by label).
                                     _existing = {a.get("label") for a in _saved_arsenals}
                                     _added = 0
                                     for _entry in _imp_payload:
@@ -6581,8 +6588,8 @@ elif st.session_state.screen == "dmstuff":
                                             _added += 1
                                     st.session_state["_dm_imp_id"] = _import_id
                                     st.success(
-                                        f"Imported {_added} new saved "
-                                        f"arsenal(s) (skipped duplicates)."
+                                        f"Imported {_added} new arsenal(s) "
+                                        f"(skipped duplicates)."
                                     )
                                 else:
                                     st.warning("File didn't contain an arsenal list.")
