@@ -7908,50 +7908,11 @@ elif st.session_state.screen == "dmstuff":
                                             edgecolors=_c, linewidths=2,
                                             marker="D", alpha=0.7, zorder=3)
 
-                            # (#12) Nearest-MLB-shape stars — plot the closest
-                            # comparable pitcher's IVB/HB as faint stars behind
-                            # the user's dots, with the comp's name shown so
-                            # coaches see a real-world reference at a glance.
-                            def _last_name_for_plot(full):
-                                """Extract last name from a 'Last, First' or
-                                'First Last' string for compact plot labels."""
-                                if not full:
-                                    return ""
-                                full = str(full).strip()
-                                if "," in full:
-                                    return full.split(",", 1)[0].strip()
-                                parts = full.split()
-                                return parts[-1] if parts else full
-
-                            _has_nn = False
-                            for _g in _user_pts_disp:
-                                _nn = _scores.get(_g, {}).get("nearest_pitcher", {})
-                                _nn_ivb = _nn.get("ivb")
-                                _nn_hb  = _nn.get("hb")
-                                _nn_name = _nn.get("name", "")
-                                _nn_year = _nn.get("year", "")
-                                if _nn_ivb is None or _nn_hb is None:
-                                    continue
-                                _has_nn = True
-                                _c = _PLT_COLORS_R.get(_g, "#aaaaaa")
-                                _star_x = _plt_sign * _nn_hb
-                                _star_y = _nn_ivb
-                                _ax.scatter(_star_x, _star_y, s=160,
-                                            color=_c, marker="*", alpha=0.55,
-                                            edgecolors="white", linewidths=0.6,
-                                            zorder=4)
-                                # Compact label: "Last 'YY" (e.g. "Williams '24")
-                                _last = _last_name_for_plot(_nn_name)
-                                _yr_short = f"'{int(_nn_year) % 100:02d}" if _nn_year else ""
-                                _lbl = (f"{_last} {_yr_short}").strip()
-                                if _lbl:
-                                    _ax.annotate(
-                                        _lbl, (_star_x, _star_y),
-                                        textcoords="offset points", xytext=(6, -10),
-                                        fontsize=7, color=_c, alpha=0.85,
-                                        path_effects=[_pe.withStroke(linewidth=2,
-                                                                      foreground="#0e1828")],
-                                    )
+                            # Nearest-MLB-shape comp stars were here. Removed
+                            # by request so the movement plot stays uncluttered.
+                            # Comp pitchers are still available as
+                            # "⤴ Load <Name> ('YY)'s full arsenal" buttons
+                            # under each per-pitch card.
 
                             # (#11) Usage-weighted dot size — primary pitches
                             # dominate visually, show-me pitches stay small.
@@ -7991,12 +7952,6 @@ elif st.session_state.screen == "dmstuff":
                                 _L2D([0],[0], marker="o", color="w", markerfacecolor="#aaaaaa",
                                      markersize=8, label="Your arsenal (size=usage)", linestyle="None"),
                             ]
-                            if _has_nn:
-                                _legend_elems.append(
-                                    _L2D([0],[0], marker="*", color="w", markerfacecolor="#aaaaaa",
-                                         markersize=10, label="Closest MLB shape", linestyle="None",
-                                         alpha=0.5)
-                                )
                             if _has_targets:
                                 _legend_elems.append(
                                     _L2D([0],[0], marker="D", color="w", markerfacecolor="none",
