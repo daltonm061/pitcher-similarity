@@ -579,6 +579,40 @@ details summary svg path {
     .stNumberInput > div > div > input { font-size: 13px !important; padding: 7px 10px !important; }
     .run-btn-wrap > div > button { font-size: 13px !important; letter-spacing: 2px !important; padding: 12px 20px !important; }
 }
+
+/* ── Reusable section header (was inlined ~14 times) ── */
+.section-h {
+    font-family: 'Inter', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    color: #c49148;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin: 0 0 12px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #1a2a40;
+}
+.section-h-sub {
+    color: #3a5a78;
+    font-size: 9px;
+    font-weight: 400;
+    letter-spacing: 1px;
+    text-transform: none;
+}
+
+/* ── Reusable small monospace footnote (was inlined ~33 times) ── */
+.note-mono {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: #5a7a90;
+    line-height: 1.7;
+}
+.note-mono-tight {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: #3a5a78;
+    line-height: 1.6;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -628,62 +662,76 @@ _PLACEHOLDER_EXTENSION  = "e.g. 6.40"
 # ── Movement-data source adjustments ────────────────────────────────
 # Our model is trained on Statcast pitch-by-pitch data, which has used
 # Hawk-Eye optical tracking since the 2020 season. TrackMan (Doppler
-# radar) reports systematically different break numbers for the same
-# pitch — usually a bit more induced vertical break, slightly more
-# horizontal. Rapsodo's hybrid radar+camera output sits between the two
-# but is closer to Hawk-Eye.
+# radar) and Rapsodo (radar + camera hybrid) report systematically
+# different break numbers for the same pitch.
 #
-# When a coach enters numbers sourced from TrackMan or Rapsodo, we
-# adjust to a Hawk-Eye-equivalent BEFORE scoring so they're compared
-# against the model's training distribution. The user still SEES the
-# numbers they entered — the adjustment is applied internally.
+# Physics of the bias (best public understanding):
+#   - TrackMan radar measures the ball's trajectory continuously over
+#     the full ~55 ft from release to plate.
+#   - Hawk-Eye's cameras lose the ball reliably around y=40 ft (last
+#     ~15 ft of flight is occluded by batter/catcher), so Hawk-Eye
+#     EXTRAPOLATES the final segment using the trajectory it saw.
+#   - That extrapolation slightly underestimates ongoing Magnus
+#     acceleration, so Hawk-Eye reports less total break than TrackMan
+#     for the same pitch.
+#   - The bias scales WITH MAGNITUDE — a pitch with 2× the Magnus
+#     acceleration has 2× the absolute gap. A multiplicative
+#     correction handles this correctly; a flat offset does not.
 #
-# Adjustments are in inches and are added to the user's input:
-#     adj_ivb = user_ivb + ivb_offset   (negative offset = scored lower)
-#     adj_hb  = user_hb  + hb_offset
+# Conversion model:
+#     hawkeye_value  =  entered_value  /  scale
 #
-# Source magnitudes are approximate (no public canonical calibration);
-# values below reflect averages reported in industry comparisons
-# (Driveline, PitcherList, FanGraphs) and aim to capture the
-# *direction* of the bias more than its exact magnitude. Per-pitch-type
-# entries override the "default" key for that source.
+# Where `scale` > 1.0 for sources that read higher than Hawk-Eye.
+# Per-pitch-type overrides let us tune for cases where the bias
+# magnitude differs (fastballs tend to show larger gaps than gyro-y
+# breaking balls). Public calibration data is sparse — values below
+# reflect reported industry comparisons (Driveline, PitcherList) and
+# aim to capture direction + rough magnitude.
 _DATA_SOURCES = ["Hawk-Eye / Statcast", "TrackMan", "Rapsodo"]
-_DATA_SOURCE_ADJ = {
+_DATA_SOURCE_SCALE = {
     "Hawk-Eye / Statcast": {
-        "default": {"ivb": 0.0, "hb": 0.0},
+        "default": {"ivb": 1.00, "hb": 1.00},
     },
     "TrackMan": {
-        # TrackMan reads higher IVB on fastballs/cutters than Hawk-Eye
-        "default":        {"ivb": -1.0, "hb": -0.5},
-        "4-Seam":         {"ivb": -1.5, "hb": -0.5},
-        "2-Seam/Sinker":  {"ivb": -1.0, "hb": -0.7},
-        "Cutter":         {"ivb": -1.5, "hb": -0.5},
-        "Slider":         {"ivb": -1.0, "hb": -0.5},
-        "Sweeper":        {"ivb": -1.0, "hb": -1.0},
-        "Curveball":      {"ivb": -1.5, "hb": -0.5},
-        "Splitter":       {"ivb": -1.0, "hb": -0.5},
-        "Changeup":       {"ivb": -1.0, "hb": -0.5},
+        # TrackMan reads ~10% higher IVB than Hawk-Eye on average;
+        # slightly more on Magnus-heavy pitches (4-Seam, Cutter),
+        # slightly less on gyro-dominant ones (Slider, Sweeper).
+        "default":         {"ivb": 1.10, "hb": 1.05},
+        "4-Seam":          {"ivb": 1.12, "hb": 1.05},
+        "2-Seam/Sinker":   {"ivb": 1.10, "hb": 1.06},
+        "Cutter":          {"ivb": 1.12, "hb": 1.05},
+        "Slider":          {"ivb": 1.08, "hb": 1.06},
+        "Sweeper":         {"ivb": 1.08, "hb": 1.08},
+        "Curveball":       {"ivb": 1.10, "hb": 1.05},
+        "Splitter":        {"ivb": 1.10, "hb": 1.05},
+        "Changeup":        {"ivb": 1.10, "hb": 1.05},
+        "Knuckleball":     {"ivb": 1.05, "hb": 1.05},
     },
     "Rapsodo": {
-        # Rapsodo is closer to Hawk-Eye than TrackMan but still reads
-        # marginally higher on most pitches
-        "default": {"ivb": -0.5, "hb": -0.2},
+        # Rapsodo's hybrid sensor is closer to Hawk-Eye than TrackMan
+        # but still reads marginally higher.
+        "default":         {"ivb": 1.05, "hb": 1.03},
     },
 }
 
 def _apply_data_source_adjustment(pitch_group: str, ivb, hb, source: str):
-    """Return (adj_ivb, adj_hb) for the given source label.
+    """Convert entered IVB/HB from `source` to a Hawk-Eye/Statcast
+    equivalent via multiplicative scaling.
 
-    Inputs are user-entered values from the device. Output is the
-    Hawk-Eye-equivalent that should be scored. NaN/None inputs pass
-    through unchanged.
+    Returns (adj_ivb, adj_hb). Both inputs and outputs are arm-side-
+    positive HB convention. NaN/None inputs pass through unchanged.
+
+    The multiplicative form means the absolute adjustment scales with
+    movement magnitude: a 20" TrackMan IVB drops more than a 5" one.
     """
-    if source not in _DATA_SOURCE_ADJ or source == "Hawk-Eye / Statcast":
+    if source not in _DATA_SOURCE_SCALE or source == "Hawk-Eye / Statcast":
         return ivb, hb
-    table = _DATA_SOURCE_ADJ[source]
-    adj = table.get(pitch_group) or table.get("default") or {"ivb": 0.0, "hb": 0.0}
-    adj_ivb = (None if ivb is None else float(ivb) + float(adj.get("ivb", 0.0)))
-    adj_hb  = (None if hb  is None else float(hb)  + float(adj.get("hb",  0.0)))
+    table = _DATA_SOURCE_SCALE[source]
+    s = table.get(pitch_group) or table.get("default") or {"ivb": 1.0, "hb": 1.0}
+    s_ivb = max(float(s.get("ivb", 1.0)), 1e-6)
+    s_hb  = max(float(s.get("hb",  1.0)), 1e-6)
+    adj_ivb = (None if ivb is None else float(ivb) / s_ivb)
+    adj_hb  = (None if hb  is None else float(hb)  / s_hb)
     return adj_ivb, adj_hb
 
 
@@ -792,25 +840,6 @@ def _pitch_explainer(group: str, shape_row: dict, sp_val: float,
     if imp_input:
         parts.append(f"Some inputs missing ({', '.join(imp_input)}) — score uses league fillers.")
     return " ".join(parts)
-
-def _usage_sum_status(pitches_dict: dict) -> tuple:
-    """Return (status, sum, message) where status is 'ok', 'warn', or 'none'.
-    Used by the calculator to surface usage entry errors."""
-    usages = [p.get("usage_pct") for p in pitches_dict.values()
-              if p.get("usage_pct") is not None]
-    if not usages:
-        return ("none", 0.0, "No usage entered — model will use MLB-typical weights.")
-    total = sum(usages)
-    if 90.0 <= total <= 110.0:
-        return ("ok", total, f"Usage sums to {total:.0f}% — model will normalize.")
-    elif total < 90.0:
-        return ("warn", total,
-                f"Usage sums to only {total:.0f}%. Did you forget a pitch? "
-                f"Model will still normalize but you may not be representing your full arsenal.")
-    else:
-        return ("warn", total,
-                f"Usage sums to {total:.0f}% (over 100%). Model will normalize, "
-                f"but you may have entered the same pitch's usage twice.")
 
 # ── Weights — #4 rel_height cut 25% (50→38), #5 velo base weight (scaled dynamically)
 # ── Gaussian similarity model ─────────────────────────────────────────────────
@@ -1113,6 +1142,144 @@ def _ordinal_word(n: int) -> str:
         return str(n)
 
 
+def build_calculator_pdf(cache: dict, arsenal_summary: dict = None) -> bytes:
+    """Render the calculator's current results into a single-page PDF.
+
+    Inputs (all optional; resilient to missing pieces):
+      cache:            the _dm_cache dict (must contain `scores`,
+                        `pitches_dict`, `dm_added`, `hand_code`)
+      arsenal_summary:  optional {"arsenal_sp": float, "grade": str,
+                        "vs_rhb": float, "vs_lhb": float} dict for the
+                        headline numbers; if absent, we compute basics.
+
+    Returns the PDF as bytes (for st.download_button). On any
+    exception, returns a small error PDF so the download still
+    succeeds and the failure is visible.
+    """
+    import io as _io_pdf
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from reportlab.pdfgen import canvas as _rl_canvas
+
+    buf = _io_pdf.BytesIO()
+    try:
+        scores  = cache.get("scores", {})
+        pdict   = cache.get("pitches_dict", {})
+        added   = cache.get("dm_added", [])
+        hand    = cache.get("hand_code", "R")
+        src     = cache.get("data_source", "Hawk-Eye / Statcast")
+
+        c = _rl_canvas.Canvas(buf, pagesize=letter)
+        W, H = letter
+        # ── Header ─────────────────────────────────────────────────
+        c.setFillColorRGB(0.83, 0.57, 0.28)
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(0.6 * inch, H - 0.7 * inch, "DM STUFF+  ·  ARSENAL REPORT")
+        c.setFillColorRGB(0.4, 0.55, 0.65)
+        c.setFont("Helvetica", 9)
+        import time as _t_pdf
+        c.drawString(0.6 * inch, H - 0.95 * inch,
+                      f"Generated {_t_pdf.strftime('%Y-%m-%d %H:%M')}  ·  "
+                      f"{('RHP' if hand == 'R' else 'LHP')}  ·  "
+                      f"source: {src}")
+
+        # ── Arsenal grade banner ───────────────────────────────────
+        if arsenal_summary:
+            asp = arsenal_summary.get("arsenal_sp")
+            grade = arsenal_summary.get("grade", "")
+            vs_r  = arsenal_summary.get("vs_rhb")
+            vs_l  = arsenal_summary.get("vs_lhb")
+            c.setFillColorRGB(0.06, 0.10, 0.16)
+            c.rect(0.6 * inch, H - 1.85 * inch, W - 1.2 * inch, 0.75 * inch, fill=1, stroke=0)
+            c.setFillColorRGB(0.83, 0.57, 0.28)
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(0.75 * inch, H - 1.25 * inch, "ARSENAL STUFF+")
+            c.setFillColorRGB(0.83, 0.65, 0.28)
+            c.setFont("Helvetica-Bold", 28)
+            if asp is not None:
+                c.drawRightString(W - 0.75 * inch, H - 1.55 * inch,
+                                   f"{asp:.1f}   {grade}")
+            if vs_r is not None and vs_l is not None:
+                c.setFillColorRGB(0.5, 0.65, 0.75)
+                c.setFont("Helvetica", 9)
+                c.drawString(0.75 * inch, H - 1.65 * inch,
+                              f"vs RHB: {vs_r:.1f}    vs LHB: {vs_l:.1f}")
+
+        # ── Per-pitch table ────────────────────────────────────────
+        y = H - 2.15 * inch
+        c.setFillColorRGB(0.83, 0.57, 0.28)
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(0.6 * inch, y, "PER-PITCH SCORES")
+        y -= 0.20 * inch
+        c.setFont("Helvetica-Bold", 8)
+        c.setFillColorRGB(0.5, 0.65, 0.75)
+        # Column headers
+        cols = [(0.60, "Pitch"), (1.85, "Velo"), (2.40, "iVB"),
+                (2.95, "HB"),    (3.50, "Spin"), (4.10, "Use%"),
+                (4.75, "Stuff+"),(5.45, "vs RHB"), (6.15, "vs LHB"),
+                (6.95, "Comp")]
+        for x_in, label in cols:
+            c.drawString(x_in * inch, y, label)
+        y -= 0.04 * inch
+        c.setStrokeColorRGB(0.10, 0.16, 0.25)
+        c.line(0.6 * inch, y, W - 0.6 * inch, y)
+        y -= 0.18 * inch
+        c.setFont("Helvetica", 9)
+        for grp in added:
+            if grp not in scores: continue
+            row = scores[grp]
+            sr  = row.get("shape_row", {})
+            sp_v = row.get("stuff_plus_overall", row.get("stuff_plus"))
+            sp_r = row.get("stuff_plus_vs_rhb")
+            sp_l = row.get("stuff_plus_vs_lhb")
+            nn = row.get("nearest_pitcher", {}) or {}
+            nn_label = (f"{nn['name'].split(',')[0].strip() if ',' in str(nn.get('name', '')) else (str(nn.get('name','')).split()[-1] if nn.get('name') else '')}"
+                        f" '{int(nn['year']) % 100:02d}" if nn.get("year") else "")
+            cells = [
+                ("", grp),
+                (1.85 * inch, f"{sr.get('start_speed', '—'):.1f}" if sr.get('start_speed') is not None else "—"),
+                (2.40 * inch, f"{sr.get('ivb_in', '—'):+.1f}"     if sr.get('ivb_in')      is not None else "—"),
+                (2.95 * inch, f"{-sr.get('hb_arm_in', 0):+.1f}"    if sr.get('hb_arm_in')   is not None else "—"),
+                (3.50 * inch, f"{int(sr.get('spin_rate', 0))}"      if sr.get('spin_rate')   else "—"),
+                (4.10 * inch, f"{int(pdict.get(grp, {}).get('usage_pct', 0))}%"
+                              if pdict.get(grp, {}).get('usage_pct') else "—"),
+                (4.75 * inch, f"{sp_v:.1f}" if sp_v is not None else "—"),
+                (5.45 * inch, f"{sp_r:.1f}" if sp_r is not None else "—"),
+                (6.15 * inch, f"{sp_l:.1f}" if sp_l is not None else "—"),
+                (6.95 * inch, nn_label or "—"),
+            ]
+            c.setFillColorRGB(0.78, 0.85, 0.90)
+            c.drawString(0.60 * inch, y, str(cells[0][1]))
+            for x_pos, val in cells[1:]:
+                c.drawString(x_pos, y, str(val))
+            y -= 0.20 * inch
+            if y < 1.2 * inch:
+                break
+
+        # ── Footer ─────────────────────────────────────────────────
+        c.setFillColorRGB(0.30, 0.45, 0.55)
+        c.setFont("Helvetica-Oblique", 7)
+        c.drawCentredString(W / 2, 0.5 * inch,
+                             f"DM Stuff+ Calculator  ·  Model trained on "
+                             f"Statcast {_DATA_YEAR_RANGE}  ·  HB in arm-side-positive convention")
+        c.save()
+        return buf.getvalue()
+    except Exception as _pdf_err:
+        # Failure mode: minimal "report failed" PDF
+        buf2 = _io_pdf.BytesIO()
+        try:
+            c = _rl_canvas.Canvas(buf2, pagesize=letter)
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(72, letter[1] - 72, "DM Stuff+ PDF generation failed")
+            c.setFont("Helvetica", 10)
+            c.drawString(72, letter[1] - 100, f"Reason: {_pdf_err}")
+            c.save()
+            return buf2.getvalue()
+        except Exception:
+            return b""
+
+
 def _v3b_per_pitch_feature_row(pitch_group, velo, ivb, hb_arm_positive,
                                  spin_rate, rel_height, rel_side_arm, extension,
                                  hand, is_same_hand):
@@ -1272,80 +1439,6 @@ def _v3b_predict_arsenal(pitches_dict, rel_height, rel_side_arm, extension,
     return pred_avg, per_group_avg, tunnel_corr
 
 
-def _v3b_suggest_usage(pitches_dict, rel_height, rel_side_arm, extension, hand,
-                         current_usages=None, n_suggestions=5,
-                         deltas_pp=(5, 10, 15, 20)):
-    """Generate usage-change suggestions using the v3b structural model.
-
-    Strategy: hold shapes fixed, perturb a single pitch's usage by
-    ±delta percentage points, renormalize others proportionally,
-    re-score. Rank by predicted arsenal outcome gain.
-
-    Returns list of dicts:
-      {group, direction (+/−), delta_pp, from_pct, to_pct, predicted_gain}
-    sorted by predicted_gain desc.
-    """
-    if _usage_v3b is None or not pitches_dict:
-        return []
-    # Default current usages: prefer user-entered, fall back to MLB typical
-    if current_usages is None:
-        current_usages = {}
-        for g, pd_g in pitches_dict.items():
-            u = pd_g.get("usage_pct")
-            if u is None:
-                u = _MLB_USAGE_FALLBACK.get(g, 15.0)
-            current_usages[g] = float(u) / 100.0  # → fraction
-    # Normalize current to sum to 1
-    s = sum(current_usages.values()) or 1.0
-    cur = {g: v / s for g, v in current_usages.items()}
-    base_pred, _, _ = _v3b_predict_arsenal(
-        pitches_dict, rel_height, rel_side_arm, extension, hand, cur
-    )
-    if base_pred is None:
-        return []
-    candidates = []
-    for grp in pitches_dict:
-        cur_u = cur.get(grp, 0.0)
-        for d_pp in deltas_pp:
-            for sign in (+1, -1):
-                d_frac = sign * d_pp / 100.0
-                new_u = cur_u + d_frac
-                # Realism bounds
-                if new_u < 0.03 or new_u > 0.65: continue
-                others = [g for g in cur if g != grp]
-                other_total = sum(cur[g] for g in others)
-                if other_total < 0.05: continue
-                # Renormalize others to fill (1 - new_u)
-                new_usages = {grp: new_u}
-                for g in others:
-                    new_usages[g] = cur[g] * (1 - new_u) / other_total
-                # Don't let any other go below 0.02
-                if min(new_usages[g] for g in others) < 0.02: continue
-                new_pred, _, _ = _v3b_predict_arsenal(
-                    pitches_dict, rel_height, rel_side_arm, extension, hand, new_usages
-                )
-                if new_pred is None: continue
-                gain = new_pred - base_pred
-                if gain <= 0.005: continue   # noise floor
-                candidates.append({
-                    "group":          grp,
-                    "direction":      "+" if sign > 0 else "−",
-                    "delta_pp":       d_pp,
-                    "from_pct":       cur_u * 100.0,
-                    "to_pct":         new_u * 100.0,
-                    "predicted_gain": float(gain),
-                })
-    candidates.sort(key=lambda c: -c["predicted_gain"])
-    # Keep at most one suggestion per (group, direction)
-    seen = set()
-    out = []
-    for c in candidates:
-        key = (c["group"], c["direction"])
-        if key in seen: continue
-        seen.add(key)
-        out.append(c)
-        if len(out) >= n_suggestions: break
-    return out
 
 
 
@@ -2144,8 +2237,10 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
                         "hb":  _nn_hb,    # arm-side-positive
                         "velo": float(closest["start_speed"]) if "start_speed" in closest else None,
                     }
-            except Exception:
-                pass
+            except Exception as _nn_err:
+                import sys as _sys
+                print(f"[nearest_pitcher:{display_grp}] failed: {_nn_err}",
+                      file=_sys.stderr)
         out[display_grp] = result
     return out
 
@@ -2639,11 +2734,36 @@ except FileNotFoundError:
 # ── Load zone stats (optional — shows "—" gracefully if not yet built) ────────
 @st.cache_data(show_spinner=False)
 def load_zone_stats() -> pd.DataFrame:
-    # Try gzip first (smaller), fall back to plain CSV
+    """Load pitch_zone_stats from the fastest available source.
+
+    Priority: parquet (4 MB, ~0.2s) → gzip CSV (smaller than raw)
+    → raw CSV (47 MB, slowest). Parquet is regenerated whenever the
+    raw CSV is newer than the parquet file.
+    """
     import os
-    if os.path.exists("pitch_zone_stats.csv.gz"):
-        return pd.read_csv("pitch_zone_stats.csv.gz", compression="gzip")
-    return pd.read_csv("pitch_zone_stats.csv")
+    _PARQ = "pitch_zone_stats.parquet"
+    _CSV  = "pitch_zone_stats.csv"
+    _GZ   = "pitch_zone_stats.csv.gz"
+    # If parquet exists and is at least as fresh as raw CSV → use it.
+    if os.path.exists(_PARQ):
+        try:
+            if not os.path.exists(_CSV) or \
+                    os.path.getmtime(_PARQ) >= os.path.getmtime(_CSV):
+                return pd.read_parquet(_PARQ)
+        except Exception as _e:
+            import sys
+            print(f"[load_zone_stats] parquet read failed, falling back: {_e}",
+                  file=sys.stderr)
+    # Otherwise read CSV (gz preferred) then write parquet for next time.
+    if os.path.exists(_GZ):
+        df = pd.read_csv(_GZ, compression="gzip")
+    else:
+        df = pd.read_csv(_CSV)
+    try:
+        df.to_parquet(_PARQ, engine="pyarrow", compression="snappy", index=False)
+    except Exception:
+        pass   # parquet write is a cache optimization; not fatal if it fails
+    return df
 
 try:
     zone_stats = load_zone_stats()
@@ -3564,6 +3684,83 @@ def find_col(df_cols, candidates):
             return lc[key]
     return None
 
+def sniff_data_source(file_bytes, filename) -> str:
+    """Identify TrackMan / Rapsodo / Hawk-Eye from an uploaded file.
+
+    Strategy by type:
+      • CSV: examine column names. TrackMan uses CamelCase ("RelSpeed",
+        "InducedVertBreak", "TaggedPitchType"); Statcast/Hawk-Eye uses
+        snake_case ("release_speed", "pfx_x", "release_spin_rate");
+        Rapsodo uses its own conventions ("Velocity Result", "VB", etc.).
+      • PDF/Image: search the text for source brand strings.
+
+    Returns one of the keys in _DATA_SOURCES, defaulting to
+    "Hawk-Eye / Statcast" when the signal is ambiguous.
+    """
+    _fl = filename.lower()
+    try:
+        if _fl.endswith(".csv"):
+            df_head = pd.read_csv(io.BytesIO(file_bytes), nrows=1)
+            cols = {str(c).strip() for c in df_head.columns}
+            cols_lower = {c.lower() for c in cols}
+            # TrackMan distinctive columns
+            tm_markers = {"RelSpeed", "InducedVertBreak", "HorzBreak",
+                          "TaggedPitchType", "AutoPitchType", "PitchUID",
+                          "VertRelAngle", "HorzRelAngle", "TmPitcherId"}
+            if tm_markers & cols:
+                return "TrackMan"
+            # Statcast / Hawk-Eye distinctive columns (snake_case)
+            statcast_markers = {"release_speed", "pfx_x", "pfx_z",
+                                  "release_spin_rate", "release_pos_x"}
+            if statcast_markers & cols_lower:
+                return "Hawk-Eye / Statcast"
+            # Rapsodo: includes "Velocity Result" / "VB" / "HB" / "Spin Rate"
+            rapsodo_markers = {"Velocity Result", "Strike Zone Side",
+                                 "Strike Zone Height"}
+            if rapsodo_markers & cols:
+                return "Rapsodo"
+        elif _fl.endswith(".pdf"):
+            # Quick text scan
+            try:
+                import re as _re
+                text = ""
+                try:
+                    import pdfplumber as _pp
+                    with _pp.open(io.BytesIO(file_bytes)) as pdf:
+                        for page in pdf.pages[:2]:
+                            t = page.extract_text() or ""
+                            text += t
+                except ImportError:
+                    try:
+                        from pypdf import PdfReader as _PdR
+                        rr = _PdR(io.BytesIO(file_bytes))
+                        for p in rr.pages[:2]:
+                            text += p.extract_text() or ""
+                    except ImportError:
+                        text = ""
+                tl = text.lower()
+                if "trackman" in tl: return "TrackMan"
+                if "rapsodo"  in tl: return "Rapsodo"
+                if "hawk-eye" in tl or "hawkeye" in tl or "statcast" in tl:
+                    return "Hawk-Eye / Statcast"
+            except Exception:
+                pass
+        elif _fl.endswith((".jpg", ".jpeg", ".png")):
+            # OCR the brand text — cheap re-OCR using tesseract via PIL
+            try:
+                import pytesseract as _pt
+                from PIL import Image as _PImg
+                img = _PImg.open(io.BytesIO(file_bytes))
+                txt = _pt.image_to_string(img).lower()
+                if "trackman" in txt: return "TrackMan"
+                if "rapsodo"  in txt: return "Rapsodo"
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return "Hawk-Eye / Statcast"
+
+
 def parse_trackman(file_bytes, filename) -> dict:
     """
     Parse a TrackMan CSV or PDF, return dict of
@@ -4473,10 +4670,7 @@ elif st.session_state.screen == "input":
 
         # ── RELEASE PROFILE ────────────────────────────────────────────────
         st.markdown(
-            "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
-            "color:#d4a848;letter-spacing:2px;text-transform:uppercase;"
-            "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
-            "● Release Profile</div>",
+            "<div class='section-h'>● Release Profile</div>",
             unsafe_allow_html=True,
         )
         rp1, rp2, rp3, rp4, rp5 = st.columns([2, 2, 2, 2, 2])
@@ -5747,6 +5941,11 @@ elif st.session_state.screen == "dmstuff":
         "🧮  DM Stuff+ Calculator</div>"
         "<div style='font-family:JetBrains Mono,monospace;font-size:11px;color:#6a90a8'>"
         f"Score any pitch through DM Stuff+ ({_dm_ver_str}) — leave fields blank to use league medians"
+        "</div>"
+        "<div style='font-family:JetBrains Mono,monospace;font-size:9px;color:#3a5a78;"
+        "margin-top:8px;letter-spacing:1px'>"
+        f"● MODEL TRAINED ON STATCAST {_DATA_YEAR_RANGE}  ·  HAWK-EYE (PRE-2020: TRACKMAN)  "
+        f"·  PER-PITCH MEAN = 100, SD = 10"
         "</div></div>",
         unsafe_allow_html=True,
     )
@@ -5830,21 +6029,35 @@ elif st.session_state.screen == "dmstuff":
                 _cur_src = st.session_state.get("dm_data_source",
                                                   _DATA_SOURCES[0])
                 if _cur_src != _DATA_SOURCES[0]:
-                    # Build a compact human-readable summary of the
-                    # adjustments being applied
-                    _tbl = _DATA_SOURCE_ADJ.get(_cur_src, {})
-                    _dflt = _tbl.get("default", {"ivb": 0.0, "hb": 0.0})
+                    # Build a human-readable summary of the multiplicative
+                    # scaling being applied. The adjustment is the % the
+                    # entered movement gets shrunk by, with a concrete
+                    # numeric example so the magnitude is intuitive.
+                    _tbl = _DATA_SOURCE_SCALE.get(_cur_src, {})
+                    _dflt = _tbl.get("default", {"ivb": 1.0, "hb": 1.0})
+                    _ivb_pct = (1 - 1/_dflt["ivb"]) * 100
+                    _hb_pct  = (1 - 1/_dflt["hb"])  * 100
+                    # Example: 18" IVB shrinks to ...; 8" HB shrinks to ...
+                    _ex_ivb_in  = 18.0
+                    _ex_ivb_out = _ex_ivb_in / _dflt["ivb"]
+                    _ex_hb_in   = 8.0
+                    _ex_hb_out  = _ex_hb_in / _dflt["hb"]
                     st.markdown(
                         "<div style='font-family:JetBrains Mono,monospace;"
                         "font-size:10px;color:#7a9ab0;margin:38px 0 0 0;"
                         "padding:10px 14px;background:#0a1218;"
                         "border:1px solid #1a2a40;border-radius:6px;line-height:1.7'>"
-                        f"Scoring will subtract approximately "
-                        f"<b style='color:#a0c0d4'>{abs(_dflt['ivb']):.1f}\" iVB</b> "
-                        f"and <b style='color:#a0c0d4'>{abs(_dflt['hb']):.1f}\" HB</b> "
-                        f"from your inputs to convert {_cur_src} → "
-                        f"Hawk-Eye equivalent. Adjustments vary by pitch "
-                        f"type. Your entered values stay as displayed."
+                        f"Scoring divides entered iVB by "
+                        f"<b style='color:#a0c0d4'>{_dflt['ivb']:.2f}</b> "
+                        f"(≈ −{_ivb_pct:.0f}%) and HB by "
+                        f"<b style='color:#a0c0d4'>{_dflt['hb']:.2f}</b> "
+                        f"(≈ −{_hb_pct:.0f}%) for {_cur_src} → Hawk-Eye. "
+                        f"Per-pitch-type scales override these defaults. "
+                        f"Example: an entered <b>{_ex_ivb_in:.0f}\" iVB</b> "
+                        f"scores as <b>{_ex_ivb_out:.1f}\"</b>; "
+                        f"<b>{_ex_hb_in:.0f}\" HB</b> → <b>{_ex_hb_out:.1f}\"</b>. "
+                        f"Absolute adjustment scales with movement magnitude. "
+                        f"Your entered values stay as displayed."
                         "</div>",
                         unsafe_allow_html=True,
                     )
@@ -5883,6 +6096,11 @@ elif st.session_state.screen == "dmstuff":
                 if st.session_state.get("_dm_tm_file_id") != _dm_file_id:
                     _fname_l = dm_tm_file.name.lower()
                     _fbytes  = dm_tm_file.read()
+                    # Auto-detect movement-data source from the file content
+                    _detected_src = sniff_data_source(_fbytes, dm_tm_file.name)
+                    if _detected_src and _detected_src in _DATA_SOURCES:
+                        st.session_state["dm_data_source"] = _detected_src
+                        st.session_state["_dm_src_autodetected"] = _detected_src
                     if _fname_l.endswith((".jpg",".jpeg",".png")):
                         with st.spinner("Reading image with OCR…"):
                             _parsed = parse_trackman_image(_fbytes, dm_tm_file.name)
@@ -5917,10 +6135,93 @@ elif st.session_state.screen == "dmstuff":
                                 st.session_state["dm_ext"] = float(_vals["extension"])
                         st.session_state.pop("_dm_cache", None)
                         _summary = ", ".join(_parsed.keys())
+                        _detect_note = ""
+                        _auto_src = st.session_state.pop("_dm_src_autodetected", None)
+                        if _auto_src:
+                            _detect_note = (
+                                f"  ·  Detected data source: **{_auto_src}** "
+                                f"(scoring adjusted accordingly)"
+                            )
                         st.success(
-                            f"Parsed: {_summary}. "
+                            f"Parsed: {_summary}.{_detect_note}  "
                             "Edit any pre-filled value below as needed."
                         )
+
+            # ── Load from MLB pitcher ────────────────────────────────────────
+            # Quick-fill from the existing profiles dataset. Picks the
+            # pitcher's most-recent season (highest year).
+            st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+            _lp_l, _lp_r = st.columns([3, 5])
+            with _lp_l:
+                st.markdown(
+                    "<div class='field-label'>Load from MLB Pitcher</div>",
+                    unsafe_allow_html=True,
+                )
+                _lp_options = ([""] + sorted(profiles["player_name"].dropna().unique().tolist())
+                                if profiles is not None else [""])
+                _lp_sel = st.selectbox(
+                    " ", options=_lp_options, index=0,
+                    key="dm_lp_pitcher",
+                    format_func=lambda x: "— Pick a pitcher to auto-fill —" if not x else x,
+                    label_visibility="collapsed",
+                    help=(
+                        "Pre-fills the entire arsenal + release profile "
+                        "with this pitcher's most-recent-season averages "
+                        "from the profiles dataset. Overwrites any current "
+                        "values."
+                    ),
+                )
+            with _lp_r:
+                st.markdown("<div style='height:23px'></div>", unsafe_allow_html=True)
+                if st.button("⤴ Apply pitcher", key="dm_lp_apply",
+                              disabled=not _lp_sel):
+                    try:
+                        _sub = profiles[profiles["player_name"] == _lp_sel]
+                        if not _sub.empty:
+                            _row = _sub.sort_values("year", ascending=False).iloc[0]
+                            # Hand + release
+                            _hand_val = str(_row.get("hand", "R")).upper()[:1]
+                            st.session_state["dm_hand_r"] = "LHP" if _hand_val == "L" else "RHP"
+                            for _src, _key in [("rel_height", "dm_rh"),
+                                                ("rel_side",   "dm_rs"),
+                                                ("extension",  "dm_ext")]:
+                                _v = _row.get(_src)
+                                if pd.notna(_v):
+                                    st.session_state[_key] = float(_v)
+                            # Clear any existing pitches first to avoid mixing
+                            for _g_old in list(st.session_state.get("_dmsp_pitches", [])):
+                                for _suf in ["_velo","_ivb","_hb","_spin","_usage","_tilt"]:
+                                    st.session_state.pop(f"dm_{_g_old}{_suf}", None)
+                            st.session_state["_dmsp_pitches"] = []
+                            # Add each pitch type the pitcher actually threw
+                            for _grp_lp in PITCH_GROUPS:
+                                _n_col = f"n_{_grp_lp}"
+                                _v_col = f"velo_{_grp_lp}"
+                                _n = _row.get(_n_col)
+                                _v = _row.get(_v_col)
+                                if pd.notna(_n) and _n > 25 and pd.notna(_v):
+                                    st.session_state["_dmsp_pitches"].append(_grp_lp)
+                                    st.session_state[f"dm_{_grp_lp}_velo"] = f"{float(_v):.1f}"
+                                    for _src, _suf in [("ivb",  "_ivb"),
+                                                        ("hb",   "_hb"),
+                                                        ("spin_rate", "_spin"),
+                                                        ("pct",  "_usage")]:
+                                        _val = _row.get(f"{_src}_{_grp_lp}")
+                                        if pd.notna(_val):
+                                            if _src == "pct":
+                                                st.session_state[f"dm_{_grp_lp}{_suf}"] = f"{float(_val)*100:.1f}"
+                                            else:
+                                                st.session_state[f"dm_{_grp_lp}{_suf}"] = f"{float(_val):.2f}"
+                            # The profiles dataset is Statcast/Hawk-Eye
+                            st.session_state["dm_data_source"] = _DATA_SOURCES[0]
+                            st.session_state.pop("_dm_cache", None)
+                            st.success(
+                                f"Loaded {_lp_sel} ({int(_row['year'])}). "
+                                f"Source set to Hawk-Eye/Statcast."
+                            )
+                            st.rerun()
+                    except Exception as _lp_err:
+                        st.warning(f"Couldn't load pitcher: {_lp_err}")
 
             st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 
@@ -5987,7 +6288,10 @@ elif st.session_state.screen == "dmstuff":
                         st.session_state.pop("_dm_cache", None)
                         st.rerun()
 
-                vc, ic, hc, sc, uc = st.columns([2, 2, 2, 2, 1])
+                # 6 columns now: velo, ivb, hb, spin, tilt, usage
+                # Tilt promoted from a buried sub-row to an inline field so
+                # coaches see it and use it. Tooltip explains why it matters.
+                vc, ic, hc, sc, tc, uc = st.columns([2, 2, 2, 2, 1.5, 1])
                 with vc:
                     st.markdown("<div class='field-label'>Velocity (mph) *</div>", unsafe_allow_html=True)
                     st.text_input(" ", value="", key=f"dm_{group}_velo",
@@ -6004,25 +6308,64 @@ elif st.session_state.screen == "dmstuff":
                     st.markdown("<div class='field-label'>Spin (rpm)</div>", unsafe_allow_html=True)
                     st.text_input(" ", value="", key=f"dm_{group}_spin",
                                    placeholder="optional", label_visibility="collapsed")
+                with tc:
+                    st.markdown(
+                        "<div class='field-label' title='Spin axis as a clock "
+                        "tilt (1–12). 12 = pure backspin (RHP riding 4-seam), "
+                        "9 = pure sidespin (LHP arm-side run), 6 = pure topspin "
+                        "(12-6 curve). Half-hours allowed (e.g. 1.5 = 1:30). "
+                        "Improves gyro/SSW estimate for breaking balls and "
+                        "sinkers; leave blank if unknown.'>Tilt (1–12)</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.text_input(" ", value="", key=f"dm_{group}_tilt",
+                                   placeholder="e.g. 1.5",
+                                   label_visibility="collapsed")
                 with uc:
                     st.markdown("<div class='field-label'>Usage %</div>", unsafe_allow_html=True)
                     st.text_input(" ", value="", key=f"dm_{group}_usage",
                                    placeholder="e.g. 35", label_visibility="collapsed")
 
-                # Optional clock tilt (#3 — spin axis input)
-                _tilt_label_col, _tilt_input_col = st.columns([1, 5])
-                with _tilt_input_col:
+            # ── Live HB convention check (LHP only) ──────────────────────
+            # Detect Trackman/catcher's-view HB signs at input time so the
+            # coach can confirm before scoring. Mirrors the post-compute
+            # detector but runs on live session_state values.
+            _dm_hand_live = st.session_state.get("dm_hand_r", "RHP")
+            if _dm_hand_live == "LHP":
+                _LHP_EXP_LIVE = {
+                    "4-Seam": +1, "2-Seam/Sinker": +1,
+                    "Splitter": +1, "Changeup": +1,
+                    "Slider": -1, "Sweeper": -1,
+                }
+                _live_wrong = _live_total = 0
+                for _g_live in st.session_state.get("_dmsp_pitches", []):
+                    _hb_raw = st.session_state.get(f"dm_{_g_live}_hb", "")
+                    try:
+                        _hb_val = float(str(_hb_raw).strip()) if str(_hb_raw).strip() else None
+                    except (TypeError, ValueError):
+                        _hb_val = None
+                    _exp_live = _LHP_EXP_LIVE.get(_g_live)
+                    if _hb_val is None or _exp_live is None or _hb_val == 0:
+                        continue
+                    _live_total += 1
+                    if (1 if _hb_val > 0 else -1) != _exp_live:
+                        _live_wrong += 1
+                if _live_total >= 2 and _live_wrong > _live_total / 2:
                     st.markdown(
-                        "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
-                        "color:#5a7a90;margin:4px 0 2px 0'>"
-                        "Spin axis (clock tilt, 1–12) — optional, improves "
-                        "gyro/SSW estimate for breaking balls &amp; sinkers"
-                        "</div>",
+                        f"<div style='margin:10px 0 0 0;padding:10px 14px;"
+                        f"background:#0a1420;border:1px solid #2a4a6a40;"
+                        f"border-radius:6px;font-family:JetBrains Mono,monospace;"
+                        f"font-size:10px;color:#5a8aaa;line-height:1.7'>"
+                        f"ℹ <b>LHP HB convention check:</b> {_live_wrong} of "
+                        f"{_live_total} entered HBs look like Trackman "
+                        f"catcher's-view (LHP arm-side negative). "
+                        f"<b>Auto-flip will apply at compute</b> so values are "
+                        f"converted to arm-side-positive for the model. "
+                        f"If this is unintended, edit the values to use "
+                        f"pitcher's view (arm-side positive)."
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
-                    st.text_input(" ", value="", key=f"dm_{group}_tilt",
-                                   placeholder="e.g. 1:30 → enter 1.5",
-                                   label_visibility="collapsed")
 
             # ── Usage sanity chip (#4) ────────────────────────────────────
             # Show only when the user has entered at least one usage value.
@@ -6151,6 +6494,101 @@ elif st.session_state.screen == "dmstuff":
                             unsafe_allow_html=True,
                         )
 
+                # ── PDF export of current results (#20) ───────────────
+                # Lets coaches print or share a one-page report card.
+                if "_dm_cache" in st.session_state:
+                    _C_pdf = st.session_state["_dm_cache"]
+                    _arsenal_summary_pdf = {
+                        "arsenal_sp": _C_pdf.get("display_arsenal_sp"),
+                        "grade":      _C_pdf.get("display_arsenal_grade"),
+                        "vs_rhb":     _C_pdf.get("display_arsenal_vs_rhb"),
+                        "vs_lhb":     _C_pdf.get("display_arsenal_vs_lhb"),
+                    }
+                    _pdf_l, _pdf_r = st.columns([3, 5])
+                    with _pdf_l:
+                        try:
+                            _pdf_bytes = build_calculator_pdf(_C_pdf, _arsenal_summary_pdf)
+                            import time as _time_pdf
+                            _pdf_fname = (
+                                f"dm_stuff_report_{_time_pdf.strftime('%Y%m%d_%H%M%S')}.pdf"
+                            )
+                            st.download_button(
+                                "📄 Export results (PDF)",
+                                data=_pdf_bytes,
+                                file_name=_pdf_fname,
+                                mime="application/pdf",
+                                key="_dm_export_pdf",
+                                help="Download a one-page PDF of the current "
+                                     "arsenal: grade, per-pitch table, source.",
+                            )
+                        except Exception as _pdfu_err:
+                            st.warning(f"PDF export unavailable: {_pdfu_err}")
+                    with _pdf_r:
+                        st.markdown(
+                            "<div style='font-family:JetBrains Mono,monospace;"
+                            "font-size:9px;color:#5a7a90;margin-top:14px'>"
+                            "Coaches: print and hand to athlete after a bullpen."
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                # ── Persistence (Export / Import JSON) ────────────────
+                # Saved arsenals are session-only by default. Download lets
+                # coaches keep tracking across sessions; upload restores.
+                _persist_l, _persist_r = st.columns([2, 2])
+                with _persist_l:
+                    if _saved_arsenals:
+                        import json as _json_persist
+                        _persist_payload = _json_persist.dumps(
+                            _saved_arsenals, default=str, indent=2
+                        )
+                        st.download_button(
+                            "📥 Export saved arsenals (.json)",
+                            data=_persist_payload,
+                            file_name="dm_stuff_saved_arsenals.json",
+                            mime="application/json",
+                            key="_dm_export_arsenals",
+                            help="Download all saved arsenals so they can be "
+                                 "restored in a future session.",
+                        )
+                with _persist_r:
+                    _persist_upload = st.file_uploader(
+                        "Import saved arsenals (.json)",
+                        type=["json"],
+                        key="_dm_import_arsenals",
+                        label_visibility="visible",
+                        help="Replace or merge into the current session's "
+                             "saved arsenals.",
+                    )
+                    if _persist_upload is not None:
+                        _import_id = f"{_persist_upload.name}_{_persist_upload.size}"
+                        if st.session_state.get("_dm_imp_id") != _import_id:
+                            try:
+                                import json as _json_imp
+                                _imp_payload = _json_imp.loads(
+                                    _persist_upload.read().decode("utf-8")
+                                )
+                                if isinstance(_imp_payload, list):
+                                    # Merge — append imported entries that don't
+                                    # already exist (by label).
+                                    _existing = {a.get("label") for a in _saved_arsenals}
+                                    _added = 0
+                                    for _entry in _imp_payload:
+                                        if (isinstance(_entry, dict)
+                                                and _entry.get("label")
+                                                and _entry["label"] not in _existing):
+                                            _saved_arsenals.append(_entry)
+                                            _added += 1
+                                    st.session_state["_dm_imp_id"] = _import_id
+                                    st.success(
+                                        f"Imported {_added} new saved "
+                                        f"arsenal(s) (skipped duplicates)."
+                                    )
+                                else:
+                                    st.warning("File didn't contain an arsenal list.")
+                            except Exception as _imp_err:
+                                st.warning(f"Couldn't import: {_imp_err}")
+
                 if _saved_arsenals:
                     with st.expander(f"📚 Saved arsenals ({len(_saved_arsenals)})",
                                      expanded=False):
@@ -6244,8 +6682,103 @@ elif st.session_state.screen == "dmstuff":
                                     f"</div>",
                                     unsafe_allow_html=True,
                                 )
-                            except Exception:
-                                pass
+
+                                # ── Side-by-side per-pitch diff ──────────
+                                # Build {group: usage_pct} for both arsenals,
+                                # then show one row per pitch with the
+                                # current value, saved value, and the delta.
+                                _now_use = {g: float(_pdict.get(g, {}).get("usage_pct") or 0)
+                                            for g in _C_now.get("dm_added", [])
+                                            if g in _C_now.get("scores", {})}
+                                _cmp_use = {}
+                                for _g_cmp, _v_cmp in _cmp_snap.get("pitches", []):
+                                    try:
+                                        _cmp_use[_g_cmp] = float(_v_cmp.get("usage") or 0)
+                                    except (TypeError, ValueError):
+                                        _cmp_use[_g_cmp] = 0.0
+                                # Union of pitches across both arsenals
+                                _all_grps_cmp = sorted(set(_now_use) | set(_cmp_use),
+                                                         key=lambda g: -(_now_use.get(g, 0)
+                                                                          + _cmp_use.get(g, 0)))
+                                if _all_grps_cmp:
+                                    _rows_html = []
+                                    for _g_cmp_r in _all_grps_cmp:
+                                        _now_u = _now_use.get(_g_cmp_r, 0.0)
+                                        _cmp_u = _cmp_use.get(_g_cmp_r, 0.0)
+                                        _du = _now_u - _cmp_u
+                                        if abs(_du) < 0.5:
+                                            _du_col = "#8a9aac"; _arrow = "·"
+                                        elif _du > 0:
+                                            _du_col = "#5ac8a0"; _arrow = "↑"
+                                        else:
+                                            _du_col = "#d48a8a"; _arrow = "↓"
+                                        _gc = PITCH_COLORS.get(_g_cmp_r, "#aaaaaa")
+                                        _rows_html.append(
+                                            f"<tr>"
+                                            f"<td style='padding:4px 10px;color:{_gc};"
+                                            f"font-weight:600'>{_g_cmp_r}</td>"
+                                            f"<td style='padding:4px 10px;text-align:right;"
+                                            f"color:#a0c0d4'>{_now_u:.0f}%</td>"
+                                            f"<td style='padding:4px 10px;text-align:right;"
+                                            f"color:#7a9ab0'>{_cmp_u:.0f}%</td>"
+                                            f"<td style='padding:4px 10px;text-align:right;"
+                                            f"color:{_du_col};font-weight:700'>"
+                                            f"{_arrow} {_du:+.0f}pp</td>"
+                                            f"</tr>"
+                                        )
+                                    st.markdown(
+                                        f"<div style='margin-top:10px;padding:8px 10px;"
+                                        f"background:#0a1218;border:1px solid #1a2a40;"
+                                        f"border-radius:6px'>"
+                                        f"<table style='width:100%;border-collapse:collapse;"
+                                        f"font-family:JetBrains Mono,monospace;font-size:10px'>"
+                                        f"<thead><tr style='border-bottom:1px solid #1a2a40'>"
+                                        f"<th style='padding:6px 10px;text-align:left;"
+                                        f"color:#5a7a90;font-weight:600'>Pitch</th>"
+                                        f"<th style='padding:6px 10px;text-align:right;"
+                                        f"color:#5a7a90;font-weight:600'>Current</th>"
+                                        f"<th style='padding:6px 10px;text-align:right;"
+                                        f"color:#5a7a90;font-weight:600'>Saved</th>"
+                                        f"<th style='padding:6px 10px;text-align:right;"
+                                        f"color:#5a7a90;font-weight:600'>Δ usage</th>"
+                                        f"</tr></thead>"
+                                        f"<tbody>{''.join(_rows_html)}</tbody></table></div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                    # Note about pitches added/dropped
+                                    _added_set = set(_now_use) - set(_cmp_use)
+                                    _dropped_set = set(_cmp_use) - set(_now_use)
+                                    _note_parts = []
+                                    if _added_set:
+                                        _note_parts.append(
+                                            f"<b style='color:#5ac8a0'>Added:</b> "
+                                            f"{', '.join(sorted(_added_set))}"
+                                        )
+                                    if _dropped_set:
+                                        _note_parts.append(
+                                            f"<b style='color:#d48a8a'>Dropped:</b> "
+                                            f"{', '.join(sorted(_dropped_set))}"
+                                        )
+                                    if _note_parts:
+                                        st.markdown(
+                                            f"<div style='font-family:JetBrains Mono,monospace;"
+                                            f"font-size:9px;color:#7a9ab0;margin-top:6px;"
+                                            f"padding:0 6px'>"
+                                            f"{'  ·  '.join(_note_parts)}</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                            except Exception as _cmp_err:
+                                import sys as _sys
+                                print(f"[compare-card] failed to render: {_cmp_err}",
+                                      file=_sys.stderr)
+                                st.markdown(
+                                    "<div style='font-family:JetBrains Mono,monospace;"
+                                    "font-size:10px;color:#a08070;padding:8px'>"
+                                    "Compare view temporarily unavailable. "
+                                    f"Reason: <code>{_cmp_err}</code>"
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
 
                 # ── Compute ───────────────────────────────────────────────────
                 if (_do_score or _auto_compute) and _dm_added:
@@ -6420,60 +6953,62 @@ elif st.session_state.screen == "dmstuff":
                                 _DIST_PENALTY = 0.20
 
                                 def _best_movement(grp, base_dict, max_delta=4.0):
+                                    """Coarse-to-fine 2-pass grid search.
+
+                                    Grid resolution chosen as a tradeoff between accuracy
+                                    and wall-time: 4×4 coarse + 4×4 fine = 32 model calls
+                                    per pitch (vs the previous 5×5+5×5 = 50). At a 4-inch
+                                    range, the 4×4 step is ~1.33", which is finer than the
+                                    plot's visual resolution can convey. Total speedup is
+                                    ~36% on the optimisation spinner with no visible
+                                    accuracy loss on the movement plot.
+                                    """
+                                    _GRID_N = 4
                                     _bd = _SEARCH_BOUNDS.get(grp, {"ivb": (-15, 25), "hb": (-25, 25)})
                                     _pd_m = base_dict[grp]
                                     _velo_m  = _pd_m.get("velo", 90)
                                     _spin_m  = _pd_m.get("spin_rate")
                                     _usage_m = _pd_m.get("usage_pct")
                                     _cur_ivb_m = _pd_m.get("ivb") or _V5_MEDIANS["ivb_in"]
-                                    # hb_arm_in median is glove-side-pos; negate → arm-side-pos
                                     _cur_hb_m  = _pd_m.get("hb") or (-_V5_MEDIANS["hb_arm_in"])
                                     _iv_lo = max(_bd["ivb"][0], _cur_ivb_m - max_delta)
                                     _iv_hi = min(_bd["ivb"][1], _cur_ivb_m + max_delta)
                                     _hb_lo = max(_bd["hb"][0],  _cur_hb_m  - max_delta)
                                     _hb_hi = min(_bd["hb"][1],  _cur_hb_m  + max_delta)
-                                    _best_obj  = -1e9
-                                    _best_iv_m, _best_hb_vm = None, None
-                                    for _iv in np.linspace(_iv_lo, _iv_hi, 5):
-                                        for _hb_v in np.linspace(_hb_lo, _hb_hi, 5):
-                                            _trial = dict(base_dict)
-                                            # Preserve usage_pct so weight normalisation is correct
-                                            _trial[grp] = {"velo": _velo_m, "ivb": _iv,
-                                                           "hb": _hb_v, "spin_rate": _spin_m,
-                                                           "usage_pct": _usage_m}
-                                            _sp_m = _score_mean(_trial)
-                                            if _sp_m is not None:
+
+                                    def _eval_grid(iv_lo, iv_hi, hb_lo, hb_hi):
+                                        best = (-1e9, None, None)
+                                        for _iv in np.linspace(iv_lo, iv_hi, _GRID_N):
+                                            for _hb_v in np.linspace(hb_lo, hb_hi, _GRID_N):
+                                                _trial = dict(base_dict)
+                                                _trial[grp] = {"velo": _velo_m, "ivb": _iv,
+                                                               "hb": _hb_v, "spin_rate": _spin_m,
+                                                               "usage_pct": _usage_m}
+                                                _sp_m = _score_mean(_trial)
+                                                if _sp_m is None:
+                                                    continue
                                                 _dist = np.sqrt((_iv - _cur_ivb_m)**2
                                                                 + (_hb_v - _cur_hb_m)**2)
                                                 _obj = _sp_m - _DIST_PENALTY * _dist
-                                                if _obj > _best_obj:
-                                                    _best_obj = _obj
-                                                    _best_iv_m = _iv
-                                                    _best_hb_vm = _hb_v
+                                                if _obj > best[0]:
+                                                    best = (_obj, _iv, _hb_v)
+                                        return best
+
+                                    _best_obj, _best_iv_m, _best_hb_vm = _eval_grid(
+                                        _iv_lo, _iv_hi, _hb_lo, _hb_hi
+                                    )
                                     if _best_iv_m is None:
                                         return None, None
-                                    # Fine search — stay within coarse bounds
-                                    _iv_step = (_iv_hi - _iv_lo) / 4
-                                    _hb_step = (_hb_hi - _hb_lo) / 4
+                                    # Fine pass around coarse optimum
+                                    _iv_step = (_iv_hi - _iv_lo) / (_GRID_N - 1)
+                                    _hb_step = (_hb_hi - _hb_lo) / (_GRID_N - 1)
                                     _fiv_lo = max(_iv_lo, _best_iv_m - _iv_step)
                                     _fiv_hi = min(_iv_hi, _best_iv_m + _iv_step)
                                     _fhb_lo = max(_hb_lo, _best_hb_vm - _hb_step)
                                     _fhb_hi = min(_hb_hi, _best_hb_vm + _hb_step)
-                                    for _iv in np.linspace(_fiv_lo, _fiv_hi, 5):
-                                        for _hb_v in np.linspace(_fhb_lo, _fhb_hi, 5):
-                                            _trial = dict(base_dict)
-                                            _trial[grp] = {"velo": _velo_m, "ivb": _iv,
-                                                           "hb": _hb_v, "spin_rate": _spin_m,
-                                                           "usage_pct": _usage_m}
-                                            _sp_m = _score_mean(_trial)
-                                            if _sp_m is not None:
-                                                _dist = np.sqrt((_iv - _cur_ivb_m)**2
-                                                                + (_hb_v - _cur_hb_m)**2)
-                                                _obj = _sp_m - _DIST_PENALTY * _dist
-                                                if _obj > _best_obj:
-                                                    _best_obj = _obj
-                                                    _best_iv_m = _iv
-                                                    _best_hb_vm = _hb_v
+                                    _obj2, _iv2, _hb2 = _eval_grid(_fiv_lo, _fiv_hi, _fhb_lo, _fhb_hi)
+                                    if _obj2 > _best_obj:
+                                        _best_iv_m, _best_hb_vm = _iv2, _hb2
                                     return _best_iv_m, _best_hb_vm
 
                                 # Current score before any optimisation
@@ -6771,8 +7306,12 @@ elif st.session_state.screen == "dmstuff":
                                     s for s in _suggestions if s[0] > 0.05
                                 ][:5]
                                 st.session_state["_dm_cache"]["baseline_mean"] = _baseline_mean
-                            except Exception:
-                                pass  # suggestions failed; top5 stays empty
+                            except Exception as _sug_err:
+                                import sys as _sys, traceback as _tb_sug
+                                print(f"[suggestions] failed: {_sug_err}\n"
+                                      f"{_tb_sug.format_exc()}", file=_sys.stderr)
+                                st.session_state["_dm_cache"]["top5"] = []
+                                st.session_state["_dm_cache"]["suggestions_error"] = str(_sug_err)
 
                             if _auto_compute:
                                 # Sync input widgets after an Apply → action
@@ -7028,7 +7567,77 @@ elif st.session_state.screen == "dmstuff":
                             f"</div>",
                             unsafe_allow_html=True,
                         )
-    
+
+                        # "Load this pitcher" quick button (#15) — pre-fills
+                        # the calculator with the nearest-MLB-shape pitcher's
+                        # arsenal in one click.
+                        _nn_for_load = _sd.get("nearest_pitcher")
+                        if _nn_for_load and profiles is not None:
+                            _nn_nm = _nn_for_load.get("name")
+                            _nn_yr = _nn_for_load.get("year")
+                            _btn_key = f"_nn_load_{group}_{_nn_nm}_{_nn_yr}"
+                            if st.button(
+                                f"⤴  Load {_nn_nm} ({_nn_yr})'s full arsenal "
+                                f"into the calculator",
+                                key=_btn_key,
+                            ):
+                                try:
+                                    _sub_lp = profiles[
+                                        (profiles["player_name"] == _nn_nm)
+                                        & (profiles["year"] == _nn_yr)
+                                    ]
+                                    if not _sub_lp.empty:
+                                        _row_lp = _sub_lp.iloc[0]
+                                        # Hand + release
+                                        _h_lp = str(_row_lp.get("hand","R")).upper()[:1]
+                                        st.session_state["dm_hand_r"] = (
+                                            "LHP" if _h_lp == "L" else "RHP"
+                                        )
+                                        for _src, _key in [
+                                                ("rel_height", "dm_rh"),
+                                                ("rel_side",   "dm_rs"),
+                                                ("extension",  "dm_ext")]:
+                                            _v = _row_lp.get(_src)
+                                            if pd.notna(_v):
+                                                st.session_state[_key] = float(_v)
+                                        # Wipe + rebuild arsenal
+                                        for _g_old in list(
+                                                st.session_state.get("_dmsp_pitches", [])):
+                                            for _suf in ["_velo","_ivb","_hb","_spin","_usage","_tilt"]:
+                                                st.session_state.pop(f"dm_{_g_old}{_suf}", None)
+                                        st.session_state["_dmsp_pitches"] = []
+                                        for _grp_lp in PITCH_GROUPS:
+                                            _n = _row_lp.get(f"n_{_grp_lp}")
+                                            _v = _row_lp.get(f"velo_{_grp_lp}")
+                                            if pd.notna(_n) and _n > 25 and pd.notna(_v):
+                                                st.session_state["_dmsp_pitches"].append(_grp_lp)
+                                                st.session_state[f"dm_{_grp_lp}_velo"] = (
+                                                    f"{float(_v):.1f}")
+                                                for _src, _suf in [
+                                                        ("ivb",  "_ivb"),
+                                                        ("hb",   "_hb"),
+                                                        ("spin_rate", "_spin"),
+                                                        ("pct",  "_usage")]:
+                                                    _val = _row_lp.get(f"{_src}_{_grp_lp}")
+                                                    if pd.notna(_val):
+                                                        if _src == "pct":
+                                                            st.session_state[
+                                                                f"dm_{_grp_lp}{_suf}"
+                                                            ] = f"{float(_val)*100:.1f}"
+                                                        else:
+                                                            st.session_state[
+                                                                f"dm_{_grp_lp}{_suf}"
+                                                            ] = f"{float(_val):.2f}"
+                                        st.session_state["dm_data_source"] = _DATA_SOURCES[0]
+                                        st.session_state.pop("_dm_cache", None)
+                                        st.success(
+                                            f"Loaded {_nn_nm} ({int(_nn_yr)}). "
+                                            f"Scroll up — entire arsenal is filled."
+                                        )
+                                        st.rerun()
+                                except Exception as _nn_load_err:
+                                    st.warning(f"Couldn't load: {_nn_load_err}")
+
                         # Zone-Stuff+ heatmaps
                         if _ZONE_AVAILABLE and "shape_row" in _scores[group]:
                             shape_row = _scores[group]["shape_row"]
@@ -7072,8 +7681,10 @@ elif st.session_state.screen == "dmstuff":
                             )
                         else:
                             _arsenal_sp = _arsenal_info.get("arsenal_stuff_plus", 100.0)
-                        # Cache for save & compare feature (#7)
-                        st.session_state["_dm_cache"]["display_arsenal_sp"] = _arsenal_sp
+                        # Cache for save/compare/PDF (#7, #19, #20)
+                        st.session_state["_dm_cache"]["display_arsenal_sp"]     = _arsenal_sp
+                        st.session_state["_dm_cache"]["display_arsenal_vs_rhb"] = _arsenal_sp_rhb
+                        st.session_state["_dm_cache"]["display_arsenal_vs_lhb"] = _arsenal_sp_lhb
                         _grade_subtitle = (
                             "Usage-weighted raw aggregation, league-standardized"
                             if _arsenal_info.get("method") == "raw_aggregation"
@@ -7087,7 +7698,8 @@ elif st.session_state.screen == "dmstuff":
                         elif _arsenal_sp >= 97:  _grade = "C+"
                         elif _arsenal_sp >= 92:  _grade = "C"
                         else:                    _grade = "D"
-    
+                        st.session_state["_dm_cache"]["display_arsenal_grade"] = _grade
+
                         if _arsenal_sp >= 107:   _grade_color = _BRAND_GOLD
                         elif _arsenal_sp >= 97:  _grade_color = "#a0c0d4"
                         elif _arsenal_sp >= 87:  _grade_color = "#8a9aac"
@@ -7102,6 +7714,51 @@ elif st.session_state.screen == "dmstuff":
                                 f" &nbsp;·&nbsp; vs LHB: <b style='color:#a0c0d4'>{_arsenal_sp_lhb}</b>"
                                 "</div>"
                             )
+
+                        # Aggregate per-pitch confidence intervals to arsenal
+                        # level using the same usage weighting that produces
+                        # the headline number. Each per-pitch p10/p90 is on
+                        # the same 100/10 scale, so the usage-weighted sum
+                        # is the arsenal-level CI on the same scale.
+                        _arsenal_p10 = _arsenal_p90 = None
+                        _usage_for_ci = {
+                            g: _pdict.get(g, {}).get("usage_pct")
+                            for g in _c_added if g in _scores
+                        }
+                        # Fill in MLB-typical usage when missing so the
+                        # weights normalize to 1 over the arsenal.
+                        _w_sum_ci = 0.0
+                        _u_ci = {}
+                        for g, u in _usage_for_ci.items():
+                            uv = (float(u) if u is not None
+                                  else float(_MLB_USAGE_FALLBACK.get(g, 15.0)))
+                            _u_ci[g] = max(uv, 0.01)
+                            _w_sum_ci += _u_ci[g]
+                        if _w_sum_ci > 0:
+                            _norm_u = {g: v / _w_sum_ci for g, v in _u_ci.items()}
+                            _p10s, _p90s = [], []
+                            for g in _u_ci:
+                                _s = _scores.get(g, {})
+                                _p10g = _s.get("stuff_plus_p10")
+                                _p90g = _s.get("stuff_plus_p90")
+                                if _p10g is not None and _p90g is not None:
+                                    _p10s.append((_norm_u[g], float(_p10g)))
+                                    _p90s.append((_norm_u[g], float(_p90g)))
+                            if len(_p10s) == len(_u_ci) and _p10s:
+                                _arsenal_p10 = sum(w * v for w, v in _p10s)
+                                _arsenal_p90 = sum(w * v for w, v in _p90s)
+                        _ci_arsenal_html = ""
+                        if _arsenal_p10 is not None and _arsenal_p90 is not None:
+                            _half = (_arsenal_p90 - _arsenal_p10) / 2.0
+                            _ci_arsenal_html = (
+                                f"<div style='font-family:JetBrains Mono,monospace;"
+                                f"font-size:10px;color:#7a9ab0;margin-top:6px'>"
+                                f"80% CI: <b style='color:#a0c0d4'>"
+                                f"{_arsenal_p10:.1f} – {_arsenal_p90:.1f}</b>"
+                                f"  &nbsp;·&nbsp; ± {_half:.1f}"
+                                f"</div>"
+                            )
+
                         st.markdown(
                             "<div style='margin:28px 0 8px 0;padding:18px 24px;"
                             "background:linear-gradient(165deg,#0e1828,#0a1520);"
@@ -7114,6 +7771,7 @@ elif st.session_state.screen == "dmstuff":
                             "<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
                             f"color:#3a5a78'>{_grade_subtitle}</div>"
                             f"{_platoon_html}"
+                            f"{_ci_arsenal_html}"
                             "</div>"
                             "<div style='display:flex;align-items:baseline;gap:14px'>"
                             f"<div style='font-family:Inter,sans-serif;font-size:36px;"
@@ -7405,7 +8063,7 @@ elif st.session_state.screen == "dmstuff":
                             "margin:0 0 4px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
                             "● Pitch Usage Verdict "
                             "<span style='color:#3a5a78;font-size:9px;font-weight:400;letter-spacing:1px'>"
-                            "(v3b model — directional only)</span></div>",
+                            "(usage allocation only — v3b model)</span></div>",
                             unsafe_allow_html=True,
                         )
                         st.markdown(
@@ -7577,10 +8235,12 @@ elif st.session_state.screen == "dmstuff":
                         "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
                         "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
                         "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
-                        "● Top 5 Improvement Suggestions</div>",
+                        "● Top 5 Improvement Suggestions "
+                        "<span style='color:#3a5a78;font-size:9px;font-weight:400;letter-spacing:1px'>"
+                        "(shape / velo / release — NOT usage)</span></div>",
                         unsafe_allow_html=True,
                     )
-    
+
                     def _apply_suggestion(action):
                         t = action["type"]
                         if t == "add_pitch":
@@ -7614,6 +8274,17 @@ elif st.session_state.screen == "dmstuff":
                         st.session_state["_dm_auto_compute"] = True
     
                     _top5 = _C.get("top5", [])
+                    _sug_err_msg = _C.get("suggestions_error")
+                    if _sug_err_msg:
+                        st.markdown(
+                            f"<div style='font-family:JetBrains Mono,monospace;font-size:10px;"
+                            f"color:#a08070;padding:10px 14px;background:#1a1410;"
+                            f"border:1px solid #3a2820;border-radius:6px;margin:0 0 12px 0'>"
+                            f"⚠ Suggestions failed to compute. "
+                            f"Reason: <code>{_sug_err_msg}</code>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
                     if not _top5:
                         st.markdown(
                             "<div style='font-family:JetBrains Mono,monospace;font-size:11px;"
