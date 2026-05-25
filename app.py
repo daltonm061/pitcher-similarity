@@ -5930,6 +5930,45 @@ elif st.session_state.screen == "dmstuff":
         except Exception:
             st.session_state["_dm_url_loaded"] = True
 
+    # ── Pending pitcher-load consumer ──────────────────────────────
+    # The "Load from MLB Pitcher" and "Load this pitcher" buttons stash
+    # the requested arsenal here so it can be applied BEFORE any widget
+    # with a `key=` is instantiated. Streamlit forbids writing to a
+    # widget's session_state key after the widget has been rendered on
+    # the current run; doing so during the button handler throws
+    # "st.session_state.<key> cannot be modified after the widget…".
+    # Applying the load HERE (above all widgets) avoids that.
+    if "_dm_pending_load" in st.session_state:
+        try:
+            _pending = st.session_state.pop("_dm_pending_load")
+            # Hand + release
+            if _pending.get("hand") is not None:
+                st.session_state["dm_hand_r"] = _pending["hand"]
+            for _src_key, _ss_key in [("rh", "dm_rh"), ("rs", "dm_rs"),
+                                        ("ext", "dm_ext")]:
+                if _pending.get(_src_key) is not None:
+                    st.session_state[_ss_key] = float(_pending[_src_key])
+            # Wipe + rebuild arsenal
+            for _g_old in list(st.session_state.get("_dmsp_pitches", [])):
+                for _suf in ["_velo","_ivb","_hb","_spin","_usage","_tilt"]:
+                    st.session_state.pop(f"dm_{_g_old}{_suf}", None)
+            st.session_state["_dmsp_pitches"] = []
+            for _g_new, _vals in _pending.get("pitches", []):
+                st.session_state["_dmsp_pitches"].append(_g_new)
+                for _f, _suf in [("velo","_velo"), ("ivb","_ivb"),
+                                  ("hb","_hb"),   ("spin_rate","_spin"),
+                                  ("spin","_spin"), ("usage","_usage"),
+                                  ("tilt","_tilt")]:
+                    if _vals.get(_f) is not None:
+                        st.session_state[f"dm_{_g_new}{_suf}"] = str(_vals[_f])
+            if _pending.get("data_source") in _DATA_SOURCES:
+                st.session_state["dm_data_source"] = _pending["data_source"]
+            st.session_state.pop("_dm_cache", None)
+            if _pending.get("toast"):
+                st.success(_pending["toast"])
+        except Exception as _pl_err:
+            st.warning(f"Couldn't apply pitcher load: {_pl_err}")
+
     # ── Back to title ─────────────────────────────────────────────────────────
     if st.button("← Back", key="back_dmstuff_to_title"):
         st.session_state.screen = "title"
@@ -6184,50 +6223,44 @@ elif st.session_state.screen == "dmstuff":
                 st.markdown("<div style='height:23px'></div>", unsafe_allow_html=True)
                 if st.button("⤴ Apply pitcher", key="dm_lp_apply",
                               disabled=not _lp_sel):
+                    # Build a pending-load packet and trigger a rerun.
+                    # The widget-key writes happen at the top of the
+                    # next run (see "Pending pitcher-load consumer"
+                    # block above), avoiding the Streamlit error
+                    # "session_state.dm_hand_r cannot be modified after
+                    # the widget … is instantiated."
                     try:
                         _sub = profiles[profiles["player_name"] == _lp_sel]
                         if not _sub.empty:
                             _row = _sub.sort_values("year", ascending=False).iloc[0]
-                            # Hand + release
                             _hand_val = str(_row.get("hand", "R")).upper()[:1]
-                            st.session_state["dm_hand_r"] = "LHP" if _hand_val == "L" else "RHP"
-                            for _src, _key in [("rel_height", "dm_rh"),
-                                                ("rel_side",   "dm_rs"),
-                                                ("extension",  "dm_ext")]:
-                                _v = _row.get(_src)
-                                if pd.notna(_v):
-                                    st.session_state[_key] = float(_v)
-                            # Clear any existing pitches first to avoid mixing
-                            for _g_old in list(st.session_state.get("_dmsp_pitches", [])):
-                                for _suf in ["_velo","_ivb","_hb","_spin","_usage","_tilt"]:
-                                    st.session_state.pop(f"dm_{_g_old}{_suf}", None)
-                            st.session_state["_dmsp_pitches"] = []
-                            # Add each pitch type the pitcher actually threw
+                            _pending_pitches = []
                             for _grp_lp in PITCH_GROUPS:
-                                _n_col = f"n_{_grp_lp}"
-                                _v_col = f"velo_{_grp_lp}"
-                                _n = _row.get(_n_col)
-                                _v = _row.get(_v_col)
+                                _n = _row.get(f"n_{_grp_lp}")
+                                _v = _row.get(f"velo_{_grp_lp}")
                                 if pd.notna(_n) and _n > 25 and pd.notna(_v):
-                                    st.session_state["_dmsp_pitches"].append(_grp_lp)
-                                    st.session_state[f"dm_{_grp_lp}_velo"] = f"{float(_v):.1f}"
-                                    for _src, _suf in [("ivb",  "_ivb"),
-                                                        ("hb",   "_hb"),
-                                                        ("spin_rate", "_spin"),
-                                                        ("pct",  "_usage")]:
+                                    _vals_lp = {"velo": f"{float(_v):.1f}"}
+                                    for _src, _f in [("ivb",       "ivb"),
+                                                      ("hb",        "hb"),
+                                                      ("spin_rate", "spin"),
+                                                      ("pct",       "usage")]:
                                         _val = _row.get(f"{_src}_{_grp_lp}")
                                         if pd.notna(_val):
                                             if _src == "pct":
-                                                st.session_state[f"dm_{_grp_lp}{_suf}"] = f"{float(_val)*100:.1f}"
+                                                _vals_lp[_f] = f"{float(_val)*100:.1f}"
                                             else:
-                                                st.session_state[f"dm_{_grp_lp}{_suf}"] = f"{float(_val):.2f}"
-                            # The profiles dataset is Statcast/Hawk-Eye
-                            st.session_state["dm_data_source"] = _DATA_SOURCES[0]
-                            st.session_state.pop("_dm_cache", None)
-                            st.success(
-                                f"Loaded {_lp_sel} ({int(_row['year'])}). "
-                                f"Source set to Hawk-Eye/Statcast."
-                            )
+                                                _vals_lp[_f] = f"{float(_val):.2f}"
+                                    _pending_pitches.append((_grp_lp, _vals_lp))
+                            st.session_state["_dm_pending_load"] = {
+                                "hand":        "LHP" if _hand_val == "L" else "RHP",
+                                "rh":          (float(_row["rel_height"]) if pd.notna(_row.get("rel_height")) else None),
+                                "rs":          (float(_row["rel_side"])   if pd.notna(_row.get("rel_side"))   else None),
+                                "ext":         (float(_row["extension"])  if pd.notna(_row.get("extension"))  else None),
+                                "pitches":     _pending_pitches,
+                                "data_source": _DATA_SOURCES[0],
+                                "toast":       f"Loaded {_lp_sel} ({int(_row['year'])}). "
+                                               f"Source set to Hawk-Eye/Statcast.",
+                            }
                             st.rerun()
                     except Exception as _lp_err:
                         st.warning(f"Couldn't load pitcher: {_lp_err}")
@@ -7610,6 +7643,10 @@ elif st.session_state.screen == "dmstuff":
                                 f"into the calculator",
                                 key=_btn_key,
                             ):
+                                # Build a pending-load packet; widget-key
+                                # writes happen at the top of the next run
+                                # to avoid Streamlit's "cannot modify after
+                                # widget instantiated" error.
                                 try:
                                     _sub_lp = profiles[
                                         (profiles["player_name"] == _nn_nm)
@@ -7617,52 +7654,38 @@ elif st.session_state.screen == "dmstuff":
                                     ]
                                     if not _sub_lp.empty:
                                         _row_lp = _sub_lp.iloc[0]
-                                        # Hand + release
                                         _h_lp = str(_row_lp.get("hand","R")).upper()[:1]
-                                        st.session_state["dm_hand_r"] = (
-                                            "LHP" if _h_lp == "L" else "RHP"
-                                        )
-                                        for _src, _key in [
-                                                ("rel_height", "dm_rh"),
-                                                ("rel_side",   "dm_rs"),
-                                                ("extension",  "dm_ext")]:
-                                            _v = _row_lp.get(_src)
-                                            if pd.notna(_v):
-                                                st.session_state[_key] = float(_v)
-                                        # Wipe + rebuild arsenal
-                                        for _g_old in list(
-                                                st.session_state.get("_dmsp_pitches", [])):
-                                            for _suf in ["_velo","_ivb","_hb","_spin","_usage","_tilt"]:
-                                                st.session_state.pop(f"dm_{_g_old}{_suf}", None)
-                                        st.session_state["_dmsp_pitches"] = []
+                                        _pending_pitches_nn = []
                                         for _grp_lp in PITCH_GROUPS:
                                             _n = _row_lp.get(f"n_{_grp_lp}")
                                             _v = _row_lp.get(f"velo_{_grp_lp}")
                                             if pd.notna(_n) and _n > 25 and pd.notna(_v):
-                                                st.session_state["_dmsp_pitches"].append(_grp_lp)
-                                                st.session_state[f"dm_{_grp_lp}_velo"] = (
-                                                    f"{float(_v):.1f}")
-                                                for _src, _suf in [
-                                                        ("ivb",  "_ivb"),
-                                                        ("hb",   "_hb"),
-                                                        ("spin_rate", "_spin"),
-                                                        ("pct",  "_usage")]:
+                                                _vals_nn = {"velo": f"{float(_v):.1f}"}
+                                                for _src, _f in [
+                                                        ("ivb",       "ivb"),
+                                                        ("hb",        "hb"),
+                                                        ("spin_rate", "spin"),
+                                                        ("pct",       "usage")]:
                                                     _val = _row_lp.get(f"{_src}_{_grp_lp}")
                                                     if pd.notna(_val):
                                                         if _src == "pct":
-                                                            st.session_state[
-                                                                f"dm_{_grp_lp}{_suf}"
-                                                            ] = f"{float(_val)*100:.1f}"
+                                                            _vals_nn[_f] = f"{float(_val)*100:.1f}"
                                                         else:
-                                                            st.session_state[
-                                                                f"dm_{_grp_lp}{_suf}"
-                                                            ] = f"{float(_val):.2f}"
-                                        st.session_state["dm_data_source"] = _DATA_SOURCES[0]
-                                        st.session_state.pop("_dm_cache", None)
-                                        st.success(
-                                            f"Loaded {_nn_nm} ({int(_nn_yr)}). "
-                                            f"Scroll up — entire arsenal is filled."
-                                        )
+                                                            _vals_nn[_f] = f"{float(_val):.2f}"
+                                                _pending_pitches_nn.append((_grp_lp, _vals_nn))
+                                        st.session_state["_dm_pending_load"] = {
+                                            "hand":        "LHP" if _h_lp == "L" else "RHP",
+                                            "rh":          (float(_row_lp["rel_height"])
+                                                              if pd.notna(_row_lp.get("rel_height")) else None),
+                                            "rs":          (float(_row_lp["rel_side"])
+                                                              if pd.notna(_row_lp.get("rel_side")) else None),
+                                            "ext":         (float(_row_lp["extension"])
+                                                              if pd.notna(_row_lp.get("extension")) else None),
+                                            "pitches":     _pending_pitches_nn,
+                                            "data_source": _DATA_SOURCES[0],
+                                            "toast":       f"Loaded {_nn_nm} ({int(_nn_yr)}). "
+                                                           f"Scroll up — entire arsenal is filled.",
+                                        }
                                         st.rerun()
                                 except Exception as _nn_load_err:
                                     st.warning(f"Couldn't load: {_nn_load_err}")
