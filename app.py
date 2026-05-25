@@ -6503,98 +6503,120 @@ elif st.session_state.screen == "dmstuff":
                             unsafe_allow_html=True,
                         )
 
-                # ── Export / Import row ──────────────────────────────
-                # Three actions in a balanced 3-column row:
-                #   1. PDF export of current results       (hidden if reportlab missing)
-                #   2. JSON export of saved arsenals       (hidden if no saves yet)
-                #   3. JSON import of saved arsenals       (always visible)
-                # Columns are equal so the row reads cleanly regardless of
-                # which actions are available this session.
-                _exp_pdf_col, _exp_json_col, _imp_json_col = st.columns([1, 1, 1])
+                # ── Export / Import (collapsed expander) ─────────────
+                # Wrapped in an expander so the import file-uploader
+                # widget doesn't render orphaned at the bottom of the
+                # page when there's nothing to export and no compute yet.
+                with st.expander("📦  Export / Import results", expanded=False):
+                    st.markdown(
+                        "<div class='note-mono' style='margin-bottom:10px'>"
+                        "Download a PDF of the current results, export "
+                        "your session's saved arsenals as JSON, or import "
+                        "a previously-exported JSON to restore them."
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    _exp_pdf_col, _exp_json_col, _imp_json_col = st.columns([1, 1, 1])
 
-                # PDF export
-                with _exp_pdf_col:
-                    if _PDF_AVAILABLE and "_dm_cache" in st.session_state:
-                        _C_pdf = st.session_state["_dm_cache"]
-                        try:
-                            _pdf_bytes = build_calculator_pdf(_C_pdf, {
-                                "arsenal_sp": _C_pdf.get("display_arsenal_sp"),
-                                "grade":      _C_pdf.get("display_arsenal_grade"),
-                                "vs_rhb":     _C_pdf.get("display_arsenal_vs_rhb"),
-                                "vs_lhb":     _C_pdf.get("display_arsenal_vs_lhb"),
-                            })
-                            import time as _time_pdf
-                            _pdf_fname = (
-                                f"dm_stuff_report_{_time_pdf.strftime('%Y%m%d_%H%M%S')}.pdf"
+                    # PDF export
+                    with _exp_pdf_col:
+                        if _PDF_AVAILABLE and "_dm_cache" in st.session_state:
+                            _C_pdf = st.session_state["_dm_cache"]
+                            try:
+                                _pdf_bytes = build_calculator_pdf(_C_pdf, {
+                                    "arsenal_sp": _C_pdf.get("display_arsenal_sp"),
+                                    "grade":      _C_pdf.get("display_arsenal_grade"),
+                                    "vs_rhb":     _C_pdf.get("display_arsenal_vs_rhb"),
+                                    "vs_lhb":     _C_pdf.get("display_arsenal_vs_lhb"),
+                                })
+                                import time as _time_pdf
+                                _pdf_fname = (
+                                    f"dm_stuff_report_{_time_pdf.strftime('%Y%m%d_%H%M%S')}.pdf"
+                                )
+                                st.download_button(
+                                    "📄  Report (PDF)",
+                                    data=_pdf_bytes,
+                                    file_name=_pdf_fname,
+                                    mime="application/pdf",
+                                    key="_dm_export_pdf",
+                                    width="stretch",
+                                    help="One-page PDF report — grade, "
+                                         "per-pitch table, source.",
+                                )
+                            except Exception as _pdfu_err:
+                                import sys as _sys_pdf
+                                print(f"[pdf] export failed: {_pdfu_err}", file=_sys_pdf.stderr)
+                        else:
+                            st.markdown(
+                                "<div class='note-mono' style='opacity:0.6;"
+                                "padding:8px 0'>PDF available after compute.</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                    # JSON export of saved arsenals
+                    with _exp_json_col:
+                        if _saved_arsenals:
+                            import json as _json_persist
+                            _persist_payload = _json_persist.dumps(
+                                _saved_arsenals, default=str, indent=2
                             )
                             st.download_button(
-                                "📄  Report (PDF)",
-                                data=_pdf_bytes,
-                                file_name=_pdf_fname,
-                                mime="application/pdf",
-                                key="_dm_export_pdf",
+                                "📥  Saved (JSON)",
+                                data=_persist_payload,
+                                file_name="dm_stuff_saved_arsenals.json",
+                                mime="application/json",
+                                key="_dm_export_arsenals",
                                 width="stretch",
-                                help="One-page PDF report of the current "
-                                     "arsenal — grade, per-pitch table, source.",
+                                help="Download all saved arsenals so they "
+                                     "can be restored in a future session.",
                             )
-                        except Exception as _pdfu_err:
-                            import sys as _sys_pdf
-                            print(f"[pdf] export failed: {_pdfu_err}", file=_sys_pdf.stderr)
+                        else:
+                            st.markdown(
+                                "<div class='note-mono' style='opacity:0.6;"
+                                "padding:8px 0'>No saved arsenals yet.</div>",
+                                unsafe_allow_html=True,
+                            )
 
-                # JSON export of saved arsenals
-                with _exp_json_col:
-                    if _saved_arsenals:
-                        import json as _json_persist
-                        _persist_payload = _json_persist.dumps(
-                            _saved_arsenals, default=str, indent=2
+                    # JSON import of saved arsenals
+                    with _imp_json_col:
+                        st.markdown(
+                            "<div class='field-label'>Import saved (.json)</div>",
+                            unsafe_allow_html=True,
                         )
-                        st.download_button(
-                            "📥  Saved (JSON)",
-                            data=_persist_payload,
-                            file_name="dm_stuff_saved_arsenals.json",
-                            mime="application/json",
-                            key="_dm_export_arsenals",
-                            width="stretch",
-                            help="Download all saved arsenals so they can be "
-                                 "restored in a future session.",
+                        _persist_upload = st.file_uploader(
+                            " ",
+                            type=["json"],
+                            key="_dm_import_arsenals",
+                            label_visibility="collapsed",
+                            help="Restore previously-exported saved arsenals. "
+                                 "Duplicates by label are skipped.",
                         )
-
-                # JSON import of saved arsenals
-                with _imp_json_col:
-                    _persist_upload = st.file_uploader(
-                        "Import saved arsenals (.json)",
-                        type=["json"],
-                        key="_dm_import_arsenals",
-                        label_visibility="collapsed",
-                        help="Restore previously-exported saved arsenals. "
-                             "Duplicates by label are skipped.",
-                    )
-                    if _persist_upload is not None:
-                        _import_id = f"{_persist_upload.name}_{_persist_upload.size}"
-                        if st.session_state.get("_dm_imp_id") != _import_id:
-                            try:
-                                import json as _json_imp
-                                _imp_payload = _json_imp.loads(
-                                    _persist_upload.read().decode("utf-8")
-                                )
-                                if isinstance(_imp_payload, list):
-                                    _existing = {a.get("label") for a in _saved_arsenals}
-                                    _added = 0
-                                    for _entry in _imp_payload:
-                                        if (isinstance(_entry, dict)
-                                                and _entry.get("label")
-                                                and _entry["label"] not in _existing):
-                                            _saved_arsenals.append(_entry)
-                                            _added += 1
-                                    st.session_state["_dm_imp_id"] = _import_id
-                                    st.success(
-                                        f"Imported {_added} new arsenal(s) "
-                                        f"(skipped duplicates)."
+                        if _persist_upload is not None:
+                            _import_id = f"{_persist_upload.name}_{_persist_upload.size}"
+                            if st.session_state.get("_dm_imp_id") != _import_id:
+                                try:
+                                    import json as _json_imp
+                                    _imp_payload = _json_imp.loads(
+                                        _persist_upload.read().decode("utf-8")
                                     )
-                                else:
-                                    st.warning("File didn't contain an arsenal list.")
-                            except Exception as _imp_err:
-                                st.warning(f"Couldn't import: {_imp_err}")
+                                    if isinstance(_imp_payload, list):
+                                        _existing = {a.get("label") for a in _saved_arsenals}
+                                        _added = 0
+                                        for _entry in _imp_payload:
+                                            if (isinstance(_entry, dict)
+                                                    and _entry.get("label")
+                                                    and _entry["label"] not in _existing):
+                                                _saved_arsenals.append(_entry)
+                                                _added += 1
+                                        st.session_state["_dm_imp_id"] = _import_id
+                                        st.success(
+                                            f"Imported {_added} new arsenal(s) "
+                                            f"(skipped duplicates)."
+                                        )
+                                    else:
+                                        st.warning("File didn't contain an arsenal list.")
+                                except Exception as _imp_err:
+                                    st.warning(f"Couldn't import: {_imp_err}")
 
                 if _saved_arsenals:
                     with st.expander(f"📚 Saved arsenals ({len(_saved_arsenals)})",
