@@ -1251,11 +1251,14 @@ def build_calculator_pdf(cache: dict, arsenal_summary: dict = None) -> bytes:
             nn = row.get("nearest_pitcher", {}) or {}
             nn_label = (f"{nn['name'].split(',')[0].strip() if ',' in str(nn.get('name', '')) else (str(nn.get('name','')).split()[-1] if nn.get('name') else '')}"
                         f" '{int(nn['year']) % 100:02d}" if nn.get("year") else "")
+            _pdg = pdict.get(grp, {})
+            _ivb_disp = _pdg.get("ivb_entered") if _pdg.get("ivb_entered") is not None else sr.get("ivb_in")
+            _hb_disp = _pdg.get("hb_entered") if _pdg.get("hb_entered") is not None else sr.get("hb_arm_in")
             cells = [
                 ("", grp),
                 (1.85 * inch, f"{sr.get('start_speed', '—'):.1f}" if sr.get('start_speed') is not None else "—"),
-                (2.40 * inch, f"{sr.get('ivb_in', '—'):+.1f}"     if sr.get('ivb_in')      is not None else "—"),
-                (2.95 * inch, f"{-sr.get('hb_arm_in', 0):+.1f}"    if sr.get('hb_arm_in')   is not None else "—"),
+                (2.40 * inch, f"{_ivb_disp:+.1f}" if _ivb_disp is not None else "—"),
+                (2.95 * inch, f"{-_hb_disp:+.1f}" if _hb_disp is not None else "—"),
                 (3.50 * inch, f"{int(sr.get('spin_rate', 0))}"      if sr.get('spin_rate')   else "—"),
                 (4.10 * inch, f"{int(pdict.get(grp, {}).get('usage_pct', 0))}%"
                               if pdict.get(grp, {}).get('usage_pct') else "—"),
