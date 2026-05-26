@@ -1181,6 +1181,12 @@ def build_calculator_pdf(cache: dict, arsenal_summary: dict = None) -> bytes:
 
         c = _rl_canvas.Canvas(buf, pagesize=letter)
         W, H = letter
+        
+        def _draw_bg():
+            c.setFillColorRGB(0.05, 0.08, 0.13)
+            c.rect(0, 0, W, H, fill=1, stroke=0)
+            
+        _draw_bg()
         # ── Header ─────────────────────────────────────────────────
         c.setFillColorRGB(0.83, 0.57, 0.28)
         c.setFont("Helvetica-Bold", 18)
@@ -1276,6 +1282,7 @@ def build_calculator_pdf(cache: dict, arsenal_summary: dict = None) -> bytes:
             y -= plot_h + 0.2 * inch
             if y < 0.8 * inch:
                 c.showPage()
+                _draw_bg()
                 y = H - plot_h - 1 * inch
             c.drawImage(img, W / 2 - plot_w / 2, y, width=plot_w, height=plot_h, preserveAspectRatio=True, mask='auto')
 
