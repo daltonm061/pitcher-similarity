@@ -1266,6 +1266,20 @@ def build_calculator_pdf(cache: dict, arsenal_summary: dict = None) -> bytes:
             if y < 1.2 * inch:
                 break
 
+        # ── Movement Plot ──────────────────────────────────────────
+        plot_bytes = cache.get("plot_img_bytes")
+        if plot_bytes:
+            from reportlab.lib.utils import ImageReader
+            img = ImageReader(_io_pdf.BytesIO(plot_bytes))
+            plot_h = 3.5 * inch
+            plot_w = 4.0 * inch
+            y -= plot_h + 0.2 * inch
+            if y < 0.8 * inch:
+                c.showPage()
+                y = H - plot_h - 1 * inch
+            c.drawImage(img, W / 2 - plot_w / 2, y, width=plot_w, height=plot_h, preserveAspectRatio=True, mask='auto')
+
+
         # ── Footer ─────────────────────────────────────────────────
         c.setFillColorRGB(0.30, 0.45, 0.55)
         c.setFont("Helvetica-Oblique", 7)
@@ -1711,10 +1725,22 @@ def _score_v5_arsenal(pitches: dict, rel_height: float = None,
     # Fill release-profile defaults
     rh  = float(rel_height) if rel_height is not None else _V5_MEDIANS["rel_height"]
     ext = float(extension)  if extension  is not None else _V5_MEDIANS["extension"]
-    # Convert rel_side to arm-side convention (input is already arm-side positive)
+    # rel_side sign-convention bridge between calculator input and v8c training.
+    #
+    # CALCULATOR INPUT  : user enters a POSITIVE value for arm-side release
+    #                     (per the field label "Rel Side — arm side").
+    # V8C TRAINING      : `df["rel_side_arm"] = np.where(is_lhp, -pfx_x, pfx_x)`,
+    #                     which produces a NEGATIVE value for arm-side release
+    #                     for BOTH hands (see train_stuff_plus_v8c.py L883).
+    #                     The variable is misleadingly named — it is actually
+    #                     glove-side-positive in the v8c bundle.
+    #
+    # The earlier RHP-only flip left LHP user input with the wrong sign, which
+    # propagated into haa_aa residualisation, rel_quadrant, and rel_side_x_typeint
+    # and biased LHP Stuff+ by a few points. Fix: flip the sign for both hands.
     rs_arm = float(rel_side) if rel_side is not None else _V5_MEDIANS["rel_side_arm"]
-    if rs_arm > 0 and hand == "R":
-        rs_arm = -rs_arm  # arm-side for RHP is negative in raw Statcast convention
+    if rs_arm > 0:
+        rs_arm = -rs_arm
 
     arsenal_imputed_release = []
     if rel_height is None: arsenal_imputed_release.append("rel_height")
@@ -7230,13 +7256,13 @@ elif st.session_state.screen == "dmstuff":
                                                          "field": _feat, "value": round(_new_val, 1)},
                                                     ))
 
-                                    # 3. Velo tweaks on offspeed/breaking (±2 mph and ±3 mph)
+                                    # 3. Velo tweaks on offspeed/breaking (+2 mph and +3 mph)
                                     for _grp, _pd_s in pitches_dict.items():
                                         if _grp in _FB_GROUPS_S:
                                             continue
                                         _cur_v = _pd_s.get("velo", 0)
                                         for _delta_v in [2.0, 3.0]:
-                                            for _sign, _sign_str in [(+1, "+"), (-1, "−")]:
+                                            for _sign, _sign_str in [(+1, "+")]:
                                                 _try_d = {g: dict(v) for g, v in pitches_dict.items()}
                                                 _new_v = _cur_v + _sign * _delta_v
                                                 _try_d[_grp]["velo"] = _new_v
@@ -8007,6 +8033,12 @@ elif st.session_state.screen == "dmstuff":
                                        edgecolor="#1a2a40", labelcolor="#a0c0d4",
                                        fontsize=7, loc="best")
                             _plt.tight_layout(pad=1.0)
+                            
+                            import io as _io_plot
+                            _img_buf = _io_plot.BytesIO()
+                            _plt.savefig(_img_buf, format='png', bbox_inches='tight', dpi=200, facecolor=_fig.get_facecolor())
+                            _C["plot_img_bytes"] = _img_buf.getvalue()
+                            
                             st.pyplot(_fig, use_container_width=True)
                             _plt.close(_fig)
 
