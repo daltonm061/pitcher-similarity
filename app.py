@@ -1187,6 +1187,18 @@ def build_calculator_pdf(cache: dict, arsenal_summary: dict = None) -> bytes:
             c.rect(0, 0, W, H, fill=1, stroke=0)
             
         _draw_bg()
+
+        # Track active page count and footer
+        class PageTracker:
+            curr = 1
+        
+        def _draw_footer():
+            c.setFillColorRGB(0.30, 0.45, 0.55)
+            c.setFont("Helvetica-Oblique", 7)
+            c.drawCentredString(W / 2, 0.4 * inch,
+                                 f"DM Stuff+ Calculator  ·  Model trained on "
+                                 f"Statcast {_DATA_YEAR_RANGE}  ·  HB in arm-side-positive convention"
+                                 f"  ·  Page {PageTracker.curr}")
         # ── Header ─────────────────────────────────────────────────
         c.setFillColorRGB(0.83, 0.57, 0.28)
         c.setFont("Helvetica-Bold", 18)
@@ -1284,18 +1296,186 @@ def build_calculator_pdf(cache: dict, arsenal_summary: dict = None) -> bytes:
             plot_w = 4.0 * inch
             y -= plot_h + 0.2 * inch
             if y < 0.8 * inch:
+                _draw_footer()
                 c.showPage()
+                PageTracker.curr += 1
                 _draw_bg()
                 y = H - plot_h - 1 * inch
             c.drawImage(img, W / 2 - plot_w / 2, y, width=plot_w, height=plot_h, preserveAspectRatio=True, mask='auto')
 
+        # ── Heatmaps Page ──────────────────────────────────────────
+        if _ZONE_AVAILABLE and added:
+            valid_pitches = []
+            for grp in added:
+                if grp not in scores:
+                    continue
+                shape_row = scores[grp].get("shape_row")
+                if shape_row:
+                    valid_pitches.append((grp, shape_row))
+            
+            if valid_pitches:
+                _draw_footer()
+                c.showPage()
+                PageTracker.curr += 1
+                _draw_bg()
+                
+                # Draw Header for Page
+                c.setFillColorRGB(0.83, 0.57, 0.28)
+                c.setFont("Helvetica-Bold", 14)
+                c.drawString(0.6 * inch, H - 0.7 * inch, "ZONE STUFF+ HEATMAPS")
+                
+                c.setFillColorRGB(0.4, 0.55, 0.65)
+                c.setFont("Helvetica", 9)
+                c.drawString(0.6 * inch, H - 0.9 * inch, 
+                             "Spatial Stuff+ metrics mapped to batter's perspective (strike zone outlined in gold)")
+                
+                # Draw Color Legend at top-right
+                legend_x = W - 3.7 * inch
+                legend_y = H - 0.75 * inch
+                
+                legend_items = [
+                    ((60, 90, 160), "Cold (<90)"),
+                    ((120, 130, 140), "Avg (100)"),
+                    ((184, 148, 88), "Hot (110)"),
+                    ((212, 168, 72), "Elite (120+)"),
+                ]
+                
+                for idx, (rgb, label) in enumerate(legend_items):
+                    x_pos = legend_x + idx * 0.78 * inch
+                    # Draw small square
+                    c.setFillColorRGB(rgb[0]/255.0, rgb[1]/255.0, rgb[2]/255.0)
+                    c.rect(x_pos, legend_y, 7, 7, fill=1, stroke=0)
+                    # Draw label
+                    c.setFillColorRGB(0.5, 0.65, 0.75)
+                    c.setFont("Helvetica", 7)
+                    c.drawString(x_pos + 10, legend_y, label)
+                
+                # Heatmaps columns headers
+                cell_size = 18
+                grid_w = cell_size * 5
+                
+                x_rhb = 2.0 * inch
+                x_lhb = 4.2 * inch
+                
+                c.setFillColorRGB(0.83, 0.57, 0.28)
+                c.setFont("Helvetica-Bold", 9)
+                c.drawCentredString(x_rhb + grid_w/2, H - 1.25 * inch, "vs RHB")
+                c.drawCentredString(x_lhb + grid_w/2, H - 1.25 * inch, "vs LHB")
+                
+                # Start drawing the pitch rows
+                y = H - 1.45 * inch - grid_w  # bottom-left of the first grid
+                
+                for grp, shape_row in valid_pitches:
+                    # If we run out of vertical space, push to next page
+                    if y < 1.2 * inch:
+                        _draw_footer()
+                        c.showPage()
+                        PageTracker.curr += 1
+                        _draw_bg()
+                        
+                        # Draw Page Header
+                        c.setFillColorRGB(0.83, 0.57, 0.28)
+                        c.setFont("Helvetica-Bold", 14)
+                        c.drawString(0.6 * inch, H - 0.7 * inch, "ZONE STUFF+ HEATMAPS (CONT.)")
+                        
+                        c.setFillColorRGB(0.4, 0.55, 0.65)
+                        c.setFont("Helvetica", 9)
+                        c.drawString(0.6 * inch, H - 0.9 * inch, 
+                                     "Spatial Stuff+ metrics mapped to batter's perspective")
+                        
+                        c.setFillColorRGB(0.83, 0.57, 0.28)
+                        c.setFont("Helvetica-Bold", 9)
+                        c.drawCentredString(x_rhb + grid_w/2, H - 1.25 * inch, "vs RHB")
+                        c.drawCentredString(x_lhb + grid_w/2, H - 1.25 * inch, "vs LHB")
+                        
+                        y = H - 1.45 * inch - grid_w
+                        
+                    # Calculate zone grid for this pitch
+                    zone_grid = _score_zone_grid(shape_row, pitcher_hand=hand)
+                    if not zone_grid:
+                        continue
+                    
+                    # Draw pitch info on the left
+                    c.setFillColorRGB(0.85, 0.90, 0.95)
+                    c.setFont("Helvetica-Bold", 11)
+                    c.drawString(0.6 * inch, y + grid_w/2 + 6, grp)
+                    
+                    # Draw pitch subtext (e.g. Velo, overall Stuff+)
+                    row_data = scores[grp]
+                    sp_overall = row_data.get("stuff_plus_overall", row_data.get("stuff_plus"))
+                    sr = row_data.get("shape_row", {})
+                    velo = sr.get("start_speed")
+                    
+                    subtext_parts = []
+                    if velo is not None:
+                        subtext_parts.append(f"{velo:.1f} mph")
+                    if sp_overall is not None:
+                        subtext_parts.append(f"{sp_overall:.0f} Stf+")
+                    
+                    c.setFillColorRGB(0.5, 0.65, 0.75)
+                    c.setFont("Helvetica", 8)
+                    c.drawString(0.6 * inch, y + grid_w/2 - 6, " · ".join(subtext_parts))
+                    
+                    def get_zone_rgb(v, is_inside):
+                        if v is None:
+                            return (0.05, 0.08, 0.13)
+                        if v >= 130:
+                            rgb = (212, 168, 72)
+                        elif v >= 120:
+                            t = (v - 120) / 10.0
+                            rgb = (184 + (212-184)*t, 148 + (168-148)*t, 88 + (72-88)*t)
+                        elif v >= 110:
+                            t = (v - 110) / 10.0
+                            rgb = (160 + (184-160)*t, 140 + (148-140)*t, 110 + (88-110)*t)
+                        elif v >= 100:
+                            t = (v - 100) / 10.0
+                            rgb = (120 + (160-120)*t, 130 + (140-130)*t, 140 + (110-140)*t)
+                        elif v >= 90:
+                            t = (v - 90) / 10.0
+                            rgb = (90 + (120-90)*t, 115 + (130-115)*t, 155 + (140-155)*t)
+                        elif v >= 80:
+                            t = (v - 80) / 10.0
+                            rgb = (70 + (90-70)*t, 100 + (115-100)*t, 160 + (155-160)*t)
+                        else:
+                            rgb = (60, 90, 160)
+                        if not is_inside:
+                            rgb = tuple(c * 0.55 for c in rgb)
+                        return (rgb[0]/255.0, rgb[1]/255.0, rgb[2]/255.0)
 
-        # ── Footer ─────────────────────────────────────────────────
-        c.setFillColorRGB(0.30, 0.45, 0.55)
-        c.setFont("Helvetica-Oblique", 7)
-        c.drawCentredString(W / 2, 0.5 * inch,
-                             f"DM Stuff+ Calculator  ·  Model trained on "
-                             f"Statcast {_DATA_YEAR_RANGE}  ·  HB in arm-side-positive convention")
+                    def draw_pdf_heatmap(x_start, y_start, scores_dict):
+                        for ri, row_grid in enumerate(_ZONE_GRID):
+                            for ci, zone_num in enumerate(row_grid):
+                                grid_x = x_start + ci * cell_size
+                                grid_y = y_start + (4 - ri) * cell_size
+                                zone_sp = scores_dict.get(zone_num) if scores_dict else None
+                                is_inside = zone_num in _INSIDE_ZONES
+                                
+                                fill_r, fill_g, fill_b = get_zone_rgb(zone_sp, is_inside)
+                                c.setFillColorRGB(fill_r, fill_g, fill_b)
+                                
+                                stroke_r, stroke_g, stroke_b = (0.16, 0.23, 0.31) if is_inside else (0.10, 0.16, 0.25)
+                                c.setStrokeColorRGB(stroke_r, stroke_g, stroke_b)
+                                c.setLineWidth(0.5)
+                                c.rect(grid_x, grid_y, cell_size, cell_size, fill=1, stroke=1)
+                                
+                        # Strike zone gold border
+                        sz_x = x_start + cell_size
+                        sz_y = y_start + cell_size
+                        sz_w = cell_size * 3
+                        sz_h = cell_size * 3
+                        c.setStrokeColorRGB(0.75, 0.65, 0.47)
+                        c.setLineWidth(1.5)
+                        c.rect(sz_x, sz_y, sz_w, sz_h, fill=0, stroke=1)
+                    
+                    # Draw heatmaps
+                    draw_pdf_heatmap(x_rhb, y, zone_grid.get("vs_rhb"))
+                    draw_pdf_heatmap(x_lhb, y, zone_grid.get("vs_lhb"))
+                    
+                    # Move y down for the next pitch
+                    y -= grid_w + 0.35 * inch
+
+        # ── Save PDF and Return ────────────────────────────────────
+        _draw_footer()
         c.save()
         return buf.getvalue()
     except Exception as _pdf_err:
