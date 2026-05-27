@@ -6051,40 +6051,6 @@ elif st.session_state.screen == "dmstuff":
         _, dm_main, _ = st.columns([0.3, 11, 0.3])
         with dm_main:
 
-            # ── Release Profile ───────────────────────────────────────────────
-            st.markdown(
-                "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
-                "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
-                "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
-                "● Release Profile "
-                "<span style='color:#3a5a78;font-size:9px;font-weight:400;letter-spacing:1px'>"
-                "(optional — defaults to league medians)</span></div>",
-                unsafe_allow_html=True,
-            )
-            dr1, dr2, dr3, dr4 = st.columns([2, 2, 2, 2])
-            with dr1:
-                st.markdown("<div class='field-label'>Throwing Hand</div>", unsafe_allow_html=True)
-                dm_hand = st.radio("_dm_hand", ["RHP","LHP"], horizontal=True,
-                                    index=0, key="dm_hand_r", label_visibility="collapsed")
-            with dr2:
-                st.markdown("<div class='field-label'>Rel Height (ft)</div>", unsafe_allow_html=True)
-                dm_rh = st.number_input(" ", min_value=3.0, max_value=8.0,
-                                         value=None, step=0.01, format="%.2f",
-                                         placeholder=_PLACEHOLDER_REL_HEIGHT, key="dm_rh",
-                                         label_visibility="collapsed")
-            with dr3:
-                st.markdown("<div class='field-label'>Rel Side — arm side (ft)</div>", unsafe_allow_html=True)
-                dm_rs = st.number_input(" ", min_value=0.0, max_value=5.0,
-                                         value=None, step=0.01, format="%.2f",
-                                         placeholder=_PLACEHOLDER_REL_SIDE, key="dm_rs",
-                                         label_visibility="collapsed")
-            with dr4:
-                st.markdown("<div class='field-label'>Extension (ft)</div>", unsafe_allow_html=True)
-                dm_ext = st.number_input(" ", min_value=4.0, max_value=8.0,
-                                          value=None, step=0.01, format="%.2f",
-                                          placeholder=_PLACEHOLDER_EXTENSION, key="dm_ext",
-                                          label_visibility="collapsed")
-
             # ── TrackMan / Rapsodo Auto-Fill (calculator) ─────────────────────
             st.markdown(
                 "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
@@ -6157,6 +6123,40 @@ elif st.session_state.screen == "dmstuff":
                         )
 
             st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+
+            # ── Release Profile ───────────────────────────────────────────────
+            st.markdown(
+                "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
+                "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
+                "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
+                "● Release Profile "
+                "<span style='color:#3a5a78;font-size:9px;font-weight:400;letter-spacing:1px'>"
+                "(optional — defaults to league medians)</span></div>",
+                unsafe_allow_html=True,
+            )
+            dr1, dr2, dr3, dr4 = st.columns([2, 2, 2, 2])
+            with dr1:
+                st.markdown("<div class='field-label'>Throwing Hand</div>", unsafe_allow_html=True)
+                dm_hand = st.radio("_dm_hand", ["RHP","LHP"], horizontal=True,
+                                    index=0, key="dm_hand_r", label_visibility="collapsed")
+            with dr2:
+                st.markdown("<div class='field-label'>Rel Height (ft)</div>", unsafe_allow_html=True)
+                dm_rh = st.number_input(" ", min_value=3.0, max_value=8.0,
+                                         value=None, step=0.01, format="%.2f",
+                                         placeholder=_PLACEHOLDER_REL_HEIGHT, key="dm_rh",
+                                         label_visibility="collapsed")
+            with dr3:
+                st.markdown("<div class='field-label'>Rel Side — arm side (ft)</div>", unsafe_allow_html=True)
+                dm_rs = st.number_input(" ", min_value=0.0, max_value=5.0,
+                                         value=None, step=0.01, format="%.2f",
+                                         placeholder=_PLACEHOLDER_REL_SIDE, key="dm_rs",
+                                         label_visibility="collapsed")
+            with dr4:
+                st.markdown("<div class='field-label'>Extension (ft)</div>", unsafe_allow_html=True)
+                dm_ext = st.number_input(" ", min_value=4.0, max_value=8.0,
+                                          value=None, step=0.01, format="%.2f",
+                                          placeholder=_PLACEHOLDER_EXTENSION, key="dm_ext",
+                                          label_visibility="collapsed")
 
             # ── Movement-data source selector ─────────────────────────────
             # Lets the coach declare where their IVB/HB numbers come from
