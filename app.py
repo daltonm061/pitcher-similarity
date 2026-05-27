@@ -6085,6 +6085,79 @@ elif st.session_state.screen == "dmstuff":
                                           placeholder=_PLACEHOLDER_EXTENSION, key="dm_ext",
                                           label_visibility="collapsed")
 
+            # ── TrackMan / Rapsodo Auto-Fill (calculator) ─────────────────────
+            st.markdown(
+                "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
+                "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
+                "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
+                "● TrackMan / Rapsodo Auto-Fill "
+                "<span style='color:#3a5a78;font-size:9px;font-weight:400;letter-spacing:1px'>"
+                "(optional — CSV, PDF, or photo)</span></div>",
+                unsafe_allow_html=True,
+            )
+            dm_tm_file = st.file_uploader(
+                "Upload a TrackMan/Rapsodo CSV, PDF report, or screenshot — "
+                "metrics will be pre-filled into the pitch arsenal below.",
+                type=["csv","pdf","jpg","jpeg","png"], key="dm_tm_upload",
+            )
+            if dm_tm_file is not None:
+                _dm_file_id = f"{dm_tm_file.name}_{dm_tm_file.size}"
+                if st.session_state.get("_dm_tm_file_id") != _dm_file_id:
+                    _fname_l = dm_tm_file.name.lower()
+                    _fbytes  = dm_tm_file.read()
+                    # Auto-detect movement-data source from the file content
+                    _detected_src = sniff_data_source(_fbytes, dm_tm_file.name)
+                    if _detected_src and _detected_src in _DATA_SOURCES:
+                        st.session_state["dm_data_source"] = _detected_src
+                        st.session_state["_dm_src_autodetected"] = _detected_src
+                    if _fname_l.endswith((".jpg",".jpeg",".png")):
+                        with st.spinner("Reading image with OCR…"):
+                            _parsed = parse_trackman_image(_fbytes, dm_tm_file.name)
+                    else:
+                        _parsed = parse_trackman(_fbytes, dm_tm_file.name)
+                    if "_error" in _parsed:
+                        st.warning(f"Upload parse issue: {_parsed['_error']}")
+                        st.session_state["_dm_tm_file_id"] = None
+                    else:
+                        st.session_state["_dm_tm_file_id"] = _dm_file_id
+                        # Add parsed pitches to _dmsp_pitches and pre-fill widget keys
+                        _added_new = []
+                        for _grp, _vals in _parsed.items():
+                            if _grp not in PITCH_GROUPS:
+                                continue
+                            if _grp not in st.session_state.get("_dmsp_pitches", []):
+                                st.session_state.setdefault("_dmsp_pitches", []).append(_grp)
+                                _added_new.append(_grp)
+                            for _f, _suf in [("velo","_velo"),("ivb","_ivb"),
+                                              ("hb","_hb"),("spin_rate","_spin")]:
+                                if _vals.get(_f) is not None:
+                                    st.session_state[f"dm_{_grp}{_suf}"] = f"{_vals[_f]}"
+                            # Release profile
+                            if _vals.get("rel_height") is not None and \
+                                    st.session_state.get("dm_rh") is None:
+                                st.session_state["dm_rh"] = float(_vals["rel_height"])
+                            if _vals.get("rel_side") is not None and \
+                                    st.session_state.get("dm_rs") is None:
+                                st.session_state["dm_rs"] = float(_vals["rel_side"])
+                            if _vals.get("extension") is not None and \
+                                    st.session_state.get("dm_ext") is None:
+                                st.session_state["dm_ext"] = float(_vals["extension"])
+                        st.session_state.pop("_dm_cache", None)
+                        _summary = ", ".join(_parsed.keys())
+                        _detect_note = ""
+                        _auto_src = st.session_state.pop("_dm_src_autodetected", None)
+                        if _auto_src:
+                            _detect_note = (
+                                f"  ·  Detected data source: **{_auto_src}** "
+                                f"(scoring adjusted accordingly)"
+                            )
+                        st.success(
+                            f"Parsed: {_summary}.{_detect_note}  "
+                            "Edit any pre-filled value below as needed."
+                        )
+
+            st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+
             # ── Movement-data source selector ─────────────────────────────
             # Lets the coach declare where their IVB/HB numbers come from
             # so we can scale to Statcast-equivalent before model scoring.
@@ -6157,79 +6230,6 @@ elif st.session_state.screen == "dmstuff":
                         "</div>",
                         unsafe_allow_html=True,
                     )
-
-            st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
-
-            # ── TrackMan / Rapsodo Auto-Fill (calculator) ─────────────────────
-            st.markdown(
-                "<div style='font-family:Inter,sans-serif;font-size:11px;font-weight:700;"
-                "color:#c49148;letter-spacing:2px;text-transform:uppercase;"
-                "margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1a2a40'>"
-                "● TrackMan / Rapsodo Auto-Fill "
-                "<span style='color:#3a5a78;font-size:9px;font-weight:400;letter-spacing:1px'>"
-                "(optional — CSV, PDF, or photo)</span></div>",
-                unsafe_allow_html=True,
-            )
-            dm_tm_file = st.file_uploader(
-                "Upload a TrackMan/Rapsodo CSV, PDF report, or screenshot — "
-                "metrics will be pre-filled into the pitch arsenal below.",
-                type=["csv","pdf","jpg","jpeg","png"], key="dm_tm_upload",
-            )
-            if dm_tm_file is not None:
-                _dm_file_id = f"{dm_tm_file.name}_{dm_tm_file.size}"
-                if st.session_state.get("_dm_tm_file_id") != _dm_file_id:
-                    _fname_l = dm_tm_file.name.lower()
-                    _fbytes  = dm_tm_file.read()
-                    # Auto-detect movement-data source from the file content
-                    _detected_src = sniff_data_source(_fbytes, dm_tm_file.name)
-                    if _detected_src and _detected_src in _DATA_SOURCES:
-                        st.session_state["dm_data_source"] = _detected_src
-                        st.session_state["_dm_src_autodetected"] = _detected_src
-                    if _fname_l.endswith((".jpg",".jpeg",".png")):
-                        with st.spinner("Reading image with OCR…"):
-                            _parsed = parse_trackman_image(_fbytes, dm_tm_file.name)
-                    else:
-                        _parsed = parse_trackman(_fbytes, dm_tm_file.name)
-                    if "_error" in _parsed:
-                        st.warning(f"Upload parse issue: {_parsed['_error']}")
-                        st.session_state["_dm_tm_file_id"] = None
-                    else:
-                        st.session_state["_dm_tm_file_id"] = _dm_file_id
-                        # Add parsed pitches to _dmsp_pitches and pre-fill widget keys
-                        _added_new = []
-                        for _grp, _vals in _parsed.items():
-                            if _grp not in PITCH_GROUPS:
-                                continue
-                            if _grp not in st.session_state.get("_dmsp_pitches", []):
-                                st.session_state.setdefault("_dmsp_pitches", []).append(_grp)
-                                _added_new.append(_grp)
-                            for _f, _suf in [("velo","_velo"),("ivb","_ivb"),
-                                              ("hb","_hb"),("spin_rate","_spin")]:
-                                if _vals.get(_f) is not None:
-                                    st.session_state[f"dm_{_grp}{_suf}"] = f"{_vals[_f]}"
-                            # Release profile
-                            if _vals.get("rel_height") is not None and \
-                                    st.session_state.get("dm_rh") is None:
-                                st.session_state["dm_rh"] = float(_vals["rel_height"])
-                            if _vals.get("rel_side") is not None and \
-                                    st.session_state.get("dm_rs") is None:
-                                st.session_state["dm_rs"] = float(_vals["rel_side"])
-                            if _vals.get("extension") is not None and \
-                                    st.session_state.get("dm_ext") is None:
-                                st.session_state["dm_ext"] = float(_vals["extension"])
-                        st.session_state.pop("_dm_cache", None)
-                        _summary = ", ".join(_parsed.keys())
-                        _detect_note = ""
-                        _auto_src = st.session_state.pop("_dm_src_autodetected", None)
-                        if _auto_src:
-                            _detect_note = (
-                                f"  ·  Detected data source: **{_auto_src}** "
-                                f"(scoring adjusted accordingly)"
-                            )
-                        st.success(
-                            f"Parsed: {_summary}.{_detect_note}  "
-                            "Edit any pre-filled value below as needed."
-                        )
 
             # ── Load from MLB pitcher ────────────────────────────────────────
             # Quick-fill from the existing profiles dataset. Picks the
