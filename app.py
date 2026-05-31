@@ -2598,16 +2598,43 @@ _ZONE_TO_V5_AND_COORDS = {
 }
 
 
-def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R") -> dict:
-    """Predict Stuff+ for every (zone, platoon) given a single pitch shape row.
+def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R",
+                       metric: str = "stuff_plus",
+                       count_mode: str = "neutral",
+                       apply_shrinkage: bool = True,
+                       shrinkage_kappa: float = 100.0) -> dict:
+    """Predict heatmap values for every (zone, platoon) given a pitch shape.
 
-    shape_row : dict with the same keys as `_score_v5_arsenal` builds per
-                pitch (start_speed, ivb_in, hb_arm_in, vaa_aa, ..., plus
-                arsenal-context features filled or NaN).
+    Args
+    ----
+    shape_row    : dict matching `_score_v5_arsenal` shape-row schema.
     pitcher_hand : "R" or "L".
+    metric       : "stuff_plus" (default — composite) or, when a v6
+                   bundle is loaded, "whiff", "csw", or "xwoba" to view
+                   the diagnostic head for that outcome.
+    count_mode   : "neutral" (default), "get_ahead", or "putaway".
+                   Plugs different (mean_balls, mean_strikes, pct_2k)
+                   defaults so the heatmap reflects the strategic
+                   context the coach has in mind.
+    apply_shrinkage : if True (default), each display cell's prediction
+                      is shrunk toward its 3×3 spatial neighbour average
+                      using inverse coverage. Reduces single-cell noise
+                      spikes for low-coverage zones (#4).
 
-    Returns dict {"vs_rhb": {1: 102.3, ...}, "vs_lhb": {1: 99.4, ...}}
-            or None if zone model not loaded.
+    Returns
+    -------
+    None if the zone model isn't loaded. Otherwise a dict:
+      {
+        "vs_rhb":     {zone_int: float},      # primary metric values
+        "vs_lhb":     {zone_int: float},
+        "uncertainty": {                        # P90-P10 widths (v6 only)
+            "vs_rhb": {zone_int: float}, "vs_lhb": {zone_int: float},
+        } | None,
+        "coverage":    {zone_int: int},        # training-sample count per zone
+        "anchor":      (lo, hi),               # color scale anchors for this metric/type
+        "metric":      str,                     # echoed metric name
+        "is_v6":       bool,                    # whether v6 features (quantiles, multi-head) are available
+      }
     """
     if not _ZONE_AVAILABLE:
         return None
@@ -2616,11 +2643,34 @@ def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R") -> dict:
 
     FEATURES     = _zone_bundle["features"]
     CAT_FEATURES = _zone_bundle["cat_features"]
-    NORMS        = _zone_bundle["norms"]
-    model        = _zone_bundle["model"]
     per_type     = _zone_bundle["per_type_scalers"]
     fallback     = _zone_bundle["fallback_scaler"]
     GROUP_TO_INT = _zone_bundle["group_to_int"]
+    # v6 bundle has a "version" key; v5 doesn't.
+    _is_v6       = str(_zone_bundle.get("version", "")).startswith("zone_v6")
+
+    # Resolve metric → (model, norms_table) using the v6 bundle's heads
+    # if available; else fall back to the v5 single-output model.
+    if _is_v6:
+        _metric_map = {
+            "stuff_plus": ("composite_model",  "per_type_stuff_norms"),
+            "whiff":      ("whiff_model",      "per_type_whiff_norms"),
+            "csw":        ("csw_model",        "per_type_csw_norms"),
+            "xwoba":      ("xwoba_model",      "per_type_xwoba_norms"),
+        }
+        _mdl_key, _norms_key = _metric_map.get(metric, _metric_map["stuff_plus"])
+        model        = _zone_bundle.get(_mdl_key, _zone_bundle.get("composite_model"))
+        _norms_table = _zone_bundle.get(_norms_key, {})
+        _q10_model   = _zone_bundle.get("composite_q10_model")
+        _q90_model   = _zone_bundle.get("composite_q90_model")
+        # The standardisation for v6 outputs already-z-scored predictions —
+        # we'll convert to a "100-mean / 10-sd" display scale per type below.
+        NORMS = _zone_bundle.get("norms")    # may be None on v6
+    else:
+        model        = _zone_bundle["model"]
+        _norms_table = {}
+        _q10_model   = _q90_model = None
+        NORMS        = _zone_bundle["norms"]
 
     # Impute NaN arsenal features using per-pitch-type medians from the bundle.
     # Without this, LightGBM routes NaN values to high-prediction branches,
@@ -2637,15 +2687,22 @@ def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R") -> dict:
                 shape_row[_af] = _med.get(_af, _np.nan)
 
     # Build 52 rows: 26 zones × 2 platoons.
-    # For each app-zone (1-26), map to the v5-zone (1-14) for `zone_int` and
-    # provide accurate plate_x/z normalized coords for v5's spatial features.
-    # Count features (mean_balls, mean_strikes, pct_2k) use league-average
-    # defaults so the model gives a count-neutral prediction.
+    # For each app-zone (1-26), map to the v5-zone (1-14) for `zone_int`
+    # and provide accurate plate_x/z normalised coords for the spatial
+    # features. Count features depend on `count_mode` — coaches reason
+    # about pitches differently in 0-strike, 1-strike, and 2-strike
+    # situations, so the heatmap should reflect their intent. (#5)
     import datetime as _dt
     _default_season    = _dt.datetime.now().year
-    _LEAGUE_MEAN_BALLS   = 1.05   # avg balls-at-time-of-pitch league-wide
-    _LEAGUE_MEAN_STRIKES = 0.95   # avg strikes-at-time-of-pitch
-    _LEAGUE_PCT_2K       = 0.30   # fraction of pitches thrown in 2-strike counts
+    _COUNT_MODES = {
+        "neutral":   {"balls": 1.05, "strikes": 0.95, "pct_2k": 0.30},
+        "get_ahead": {"balls": 0.40, "strikes": 0.20, "pct_2k": 0.00},
+        "putaway":   {"balls": 1.30, "strikes": 2.00, "pct_2k": 1.00},
+    }
+    _cm = _COUNT_MODES.get(count_mode, _COUNT_MODES["neutral"])
+    _LEAGUE_MEAN_BALLS   = _cm["balls"]
+    _LEAGUE_MEAN_STRIKES = _cm["strikes"]
+    _LEAGUE_PCT_2K       = _cm["pct_2k"]
     rows = []
     keys = []
     for plat_key, batter_hand in (("vs_rhb", "R"), ("vs_lhb", "L")):
@@ -2702,62 +2759,173 @@ def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R") -> dict:
             X_out[rows_idx, col] = sub_scaled[:, i]
 
     raw = model.predict(X_out)
+    raw_q10 = _q10_model.predict(X_out) if _q10_model is not None else None
+    raw_q90 = _q90_model.predict(X_out) if _q90_model is not None else None
 
-    # Standardize to Stuff+ scale using per-type norms
+    # Per-pitch-type display scale
     pt = int(shape_row.get("pitch_type_int", -1))
     group_name = None
     for gname, gint in GROUP_TO_INT.items():
         if gint == pt:
             group_name = gname
             break
-    if group_name and group_name in NORMS.get("by_type", {}):
-        params = NORMS["by_type"][group_name]
-    else:
-        params = NORMS.get("overall", {"mean": 0, "sd": 1})
-    m_, s_ = params["mean"], max(params["sd"], 1e-6)
-    stuff_plus = 100.0 + ((raw - m_) / s_) * 10.0
+
+    def _to_display(arr):
+        """Map raw-target predictions to a 100-mean / 10-sd display scale.
+        Uses v6 per-pitch-type norms when present; otherwise falls back
+        to the v5 NORMS table (Stuff+-only).
+        """
+        if arr is None:
+            return None
+        if _is_v6 and _norms_table:
+            params = _norms_table.get(pt) or _norms_table.get("__all__") \
+                      or _norms_table.get("overall") \
+                      or {"mu": 0.0, "sd": 1.0}
+            mu = float(params.get("mu", 0.0))
+            sd = max(float(params.get("sd", 1.0)), 1e-6)
+            return 100.0 + ((arr - mu) / sd) * 10.0
+        # v5 path
+        if NORMS:
+            params_v5 = NORMS.get("by_type", {}).get(group_name) \
+                          or NORMS.get("overall", {"mean": 0, "sd": 1})
+            m_, s_ = params_v5["mean"], max(params_v5["sd"], 1e-6)
+            return 100.0 + ((arr - m_) / s_) * 10.0
+        return arr
+
+    mu_arr  = _to_display(raw)
+    p10_arr = _to_display(raw_q10) if raw_q10 is not None else None
+    p90_arr = _to_display(raw_q90) if raw_q90 is not None else None
 
     out = {"vs_rhb": {}, "vs_lhb": {}}
-    for (plat_key, zone), val in zip(keys, stuff_plus):
+    unc = {"vs_rhb": {}, "vs_lhb": {}} if p10_arr is not None else None
+    for idx, ((plat_key, zone), val) in enumerate(zip(keys, mu_arr)):
         out[plat_key][zone] = round(float(val), 1)
-    return out
+        if unc is not None:
+            unc[plat_key][zone] = round(float(p90_arr[idx] - p10_arr[idx]), 2)
+
+    # ── Coverage table (for the requested pitch type) ─────────────────
+    coverage = {}
+    _cov_all = _zone_bundle.get("zone_coverage") or {}
+    if isinstance(_cov_all, dict):
+        if group_name and group_name in _cov_all:
+            for z, n in _cov_all[group_name].items():
+                try:
+                    coverage[int(z)] = int(n)
+                except (TypeError, ValueError):
+                    pass
+        elif all(isinstance(k, (int, np.integer, str)) for k in _cov_all.keys()):
+            # Older bundle structure: top-level {zone: n}
+            for z, n in _cov_all.items():
+                try:
+                    coverage[int(z)] = int(n)
+                except (TypeError, ValueError):
+                    pass
+
+    # ── Spatial Bayesian shrinkage (#4) ───────────────────────────────
+    # Shrink each cell toward its 3×3 spatial neighbour average using
+    # inverse coverage. High-coverage cells stay sharp; low-coverage
+    # cells fade into their neighbourhood pattern.
+    if apply_shrinkage and coverage:
+        # Build a (row, col) -> zone lookup from the 5x5 display grid.
+        _pos = {}
+        for ri, row in enumerate(_ZONE_GRID):
+            for ci, z in enumerate(row):
+                _pos[int(z)] = (ri, ci)
+        # 3x3 neighbour zones for each display zone
+        _neighbours = {}
+        for z, (ri, ci) in _pos.items():
+            nbrs = []
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0: continue
+                    rn, cn = ri + dr, ci + dc
+                    if 0 <= rn < 5 and 0 <= cn < 5:
+                        nbrs.append(int(_ZONE_GRID[rn][cn]))
+            _neighbours[z] = nbrs
+
+        for plat_key in ("vs_rhb", "vs_lhb"):
+            shrunk = {}
+            for z, v in out[plat_key].items():
+                n_cell = float(coverage.get(z, 0))
+                nbr_vals = [out[plat_key].get(nz) for nz in _neighbours.get(z, [])
+                             if out[plat_key].get(nz) is not None]
+                if not nbr_vals or n_cell <= 0:
+                    shrunk[z] = v
+                    continue
+                nbr_mean = sum(nbr_vals) / len(nbr_vals)
+                adj = (n_cell * v + shrinkage_kappa * nbr_mean) / \
+                      (n_cell + shrinkage_kappa)
+                shrunk[z] = round(float(adj), 1)
+            out[plat_key] = shrunk
+
+    # ── Color anchor for this metric × pitch type (#2) ────────────────
+    if _is_v6 and _norms_table:
+        # Anchor on (μ - 1.5σ, μ + 1.5σ) after standardising to 100/10 scale.
+        # That's 100 ± 15 in display units.
+        anchor_lo, anchor_hi = 100 - 15, 100 + 15
+    else:
+        anchor_lo, anchor_hi = 80.0, 130.0
+
+    return {
+        "vs_rhb":      out["vs_rhb"],
+        "vs_lhb":      out["vs_lhb"],
+        "uncertainty": unc,
+        "coverage":    coverage,
+        "anchor":      (anchor_lo, anchor_hi),
+        "metric":      metric,
+        "is_v6":       _is_v6,
+    }
 
 
-def _zone_color(stuff_plus_val: float, is_inside_zone: bool = True) -> str:
-    """Map Stuff+ value to a heatmap color. Inside-zone cells are saturated;
-    outside-zone cells are dimmed by 35% alpha overlay.
+def _zone_color(stuff_plus_val: float, is_inside_zone: bool = True,
+                 anchor_lo: float = 80.0, anchor_hi: float = 130.0) -> str:
+    """Map a value to a heatmap color along the cool→gold gradient.
+
+    Args
+    ----
+    stuff_plus_val: value to color
+    is_inside_zone: in-zone cells stay saturated, out-of-zone cells are
+                     dimmed by mixing with the dark background
+    anchor_lo, anchor_hi: the floor and ceiling of the color scale.
+                          Default (80, 130) is league-wide Stuff+.
+                          For per-pitch-type centering (#2), pass
+                          (mu - 1.5*sd, mu + 1.5*sd) so the gradient
+                          anchors to *this pitch type's* distribution
+                          rather than the global one.
+
+    Implementation: smooth 6-stop gradient parameterised by `t` in
+    [0, 1], where t = (v - lo) / (hi - lo). Stops:
+      0.00 = deep blue, 0.20 = blue-cool, 0.40 = cool-neutral,
+      0.60 = neutral-tan, 0.80 = amber-tan, 1.00 = gold.
     """
     if stuff_plus_val is None:
         return "#1a2030"
     v = float(stuff_plus_val)
-    # Smooth gradient from cold blue (low) to gold (high)
-    # Anchor points: 80=cold, 100=neutral, 120=hot
-    if v >= 130:
-        rgb = (212, 168, 72)   # gold
-    elif v >= 120:
-        # 120-130 → gold-amber
-        t = (v - 120) / 10
-        rgb = (int(184 + (212-184)*t), int(148 + (168-148)*t), int(88 + (72-88)*t))
-    elif v >= 110:
-        # 110-120 → amber-tan
-        t = (v - 110) / 10
-        rgb = (int(160 + (184-160)*t), int(140 + (148-140)*t), int(110 + (88-110)*t))
-    elif v >= 100:
-        # 100-110 → neutral-tan
-        t = (v - 100) / 10
-        rgb = (int(120 + (160-120)*t), int(130 + (140-130)*t), int(140 + (110-140)*t))
-    elif v >= 90:
-        # 90-100 → cool blue-neutral
-        t = (v - 90) / 10
-        rgb = (int(90 + (120-90)*t), int(115 + (130-115)*t), int(155 + (140-155)*t))
-    elif v >= 80:
-        # 80-90 → blue-cool
-        t = (v - 80) / 10
-        rgb = (int(70 + (90-70)*t), int(100 + (115-100)*t), int(160 + (155-160)*t))
+    lo = float(anchor_lo); hi = float(anchor_hi)
+    if hi <= lo:
+        hi = lo + 1.0
+    t = max(0.0, min(1.0, (v - lo) / (hi - lo)))
+    # 6-stop gradient (deep blue → gold)
+    stops = [
+        (0.00, (60,  90,  160)),   # deep blue
+        (0.20, (70,  100, 160)),
+        (0.40, (90,  115, 155)),
+        (0.55, (120, 130, 140)),   # neutral
+        (0.70, (160, 140, 110)),
+        (0.85, (184, 148, 88)),
+        (1.00, (212, 168, 72)),    # gold
+    ]
+    # Find bracketing stops and lerp
+    for i in range(len(stops) - 1):
+        t0, c0 = stops[i]
+        t1, c1 = stops[i + 1]
+        if t0 <= t <= t1:
+            u = (t - t0) / max(t1 - t0, 1e-9)
+            rgb = tuple(int(c0[k] + (c1[k] - c0[k]) * u) for k in range(3))
+            break
     else:
-        rgb = (60, 90, 160)    # deep blue
+        rgb = stops[-1][1]
     if not is_inside_zone:
-        # Dim outside-zone cells by mixing with dark background
         rgb = tuple(int(c * 0.55) for c in rgb)
     return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
 
@@ -2784,16 +2952,230 @@ _ZONE_GRID = [
 _INSIDE_ZONES = set(range(1, 10))  # 1-9
 
 
+def _apply_batter_adjustment(zone_scores: dict, batter_lookup: dict,
+                                pitch_group: str) -> dict:
+    """Per-batter zone-tendency adjustment (#7).
+
+    Accepts a batter_lookup dict of the shape:
+      {
+        "zone_chase_pct":   {zone_int: float in [0,1]},   # O-swing% for this batter
+        "zone_contact_pct": {zone_int: float in [0,1]},   # contact rate on swings
+        "zone_xwoba":       {zone_int: float},            # batter's xwOBA by zone
+      }
+    Returns a new {zone_int: value} dict with each cell nudged based on
+    how the batter's tendencies amplify or suppress this pitch type in
+    that location.
+
+    Adjustment is multiplicative and capped at ±15%:
+      adj = score × (1 + 0.10 × (chase_pct - 0.30) - 0.10 × (contact_pct - 0.75))
+
+    When `batter_lookup` is empty or missing keys, returns the scores
+    unchanged. The UI shows a clear "no batter selected" status when
+    that's the case.
+
+    NOTE: This is a *framework*. Producing a real batter_lookup table
+    requires aggregating Statcast per-batter swing decisions and contact
+    quality by zone, which is a one-time data-prep step (write a small
+    aggregator that reads raw_statcast/*.parquet and saves
+    `models/batter_zone_tendencies_<year>.parquet`). See the comment in
+    `_load_batter_zone_lookup` for the schema.
+    """
+    if not zone_scores or not batter_lookup:
+        return zone_scores
+    chase = batter_lookup.get("zone_chase_pct") or {}
+    contact = batter_lookup.get("zone_contact_pct") or {}
+    if not chase and not contact:
+        return zone_scores
+    out = {}
+    for z, v in zone_scores.items():
+        if v is None:
+            out[z] = v; continue
+        ch = float(chase.get(z, 0.30))         # league avg O-swing% ~ 30%
+        co = float(contact.get(z, 0.75))       # league avg contact% ~ 75%
+        # Higher chase on this zone → pitch is more dangerous (pitcher
+        # advantage). Higher contact → pitch is less dangerous (hitter
+        # advantage). Sign convention: positive shift = better Stuff+.
+        factor = 1.0 + 0.10 * (ch - 0.30) - 0.10 * (co - 0.75)
+        factor = max(0.85, min(1.15, factor))   # cap at ±15%
+        out[z] = round(float(v) * factor, 1)
+    return out
+
+
+def _load_batter_zone_lookup(batter_id: str, pitch_group: str) -> dict:
+    """Stub: load per-batter zone tendencies from a precomputed table.
+
+    Returns an empty dict when the lookup table doesn't exist, so the
+    rest of the calculator gracefully no-ops the adjustment.
+
+    To populate: write a one-shot aggregator that produces
+    `models/batter_zone_tendencies.parquet` with columns:
+      batter_id, pitch_group, zone_int,
+      zone_chase_pct, zone_contact_pct, zone_xwoba, n_pitches
+    and load it here. Until then, the UI is wired but inactive.
+    """
+    import os
+    _tbl_path = "models/batter_zone_tendencies.parquet"
+    if not os.path.exists(_tbl_path):
+        return {}
+    try:
+        import pandas as _pd
+        df = _pd.read_parquet(_tbl_path)
+        sub = df[(df["batter_id"] == batter_id)
+                  & (df["pitch_group"] == pitch_group)]
+        if sub.empty:
+            return {}
+        return {
+            "zone_chase_pct":   dict(zip(sub["zone_int"].astype(int),
+                                           sub["zone_chase_pct"].astype(float))),
+            "zone_contact_pct": dict(zip(sub["zone_int"].astype(int),
+                                           sub["zone_contact_pct"].astype(float))),
+            "zone_xwoba":       dict(zip(sub["zone_int"].astype(int),
+                                           sub["zone_xwoba"].astype(float))),
+        }
+    except Exception:
+        return {}
+
+
+def _render_side_view_svg(shape_row: dict, title: str = "Approach Angle",
+                            width: int = 220, height: int = 130) -> str:
+    """Side-view trajectory visualisation (#11).
+
+    Shows how the pitch arrives at the plate in the vertical plane:
+    horizontal axis is approach distance (release → plate), vertical
+    axis is height. The trajectory arc is plotted from release point to
+    the plate's vertical mid-line, with the strike-zone band shaded.
+
+    Uses the per-pitch row's `vaa_raw` (approach angle), `start_speed`
+    (velocity), `rel_height` (release height), and `ivb_in` (induced
+    vertical break) to estimate the ball's flight path.
+
+    This complements the plate-view heatmap by helping coaches see
+    "high vs flat" pitches — a 7" IVB at 90 mph from a 5.0 ft slot
+    arrives with a much flatter VAA than the same shape from a 6.5 ft
+    slot. The side view makes that geometry obvious.
+    """
+    rh   = float(shape_row.get("rel_height", 5.8) or 5.8)
+    velo = float(shape_row.get("start_speed", 92.0) or 92.0)
+    ivb  = float(shape_row.get("ivb_in", 14.0) or 14.0)
+    vaa  = shape_row.get("vaa_raw")
+    if vaa is None:
+        vaa = float(shape_row.get("vaa", -5.0) or -5.0)
+    vaa = float(vaa)
+    ext  = float(shape_row.get("extension", 6.4) or 6.4)
+
+    # Plate-side coordinates
+    rel_dist = 60.5 - ext        # ~54 ft of free flight
+    # Vertical drop from release to plate, derived from VAA:
+    #   drop = rel_dist × tan(|vaa|)
+    import math as _math
+    drop = rel_dist * _math.tan(_math.radians(abs(vaa)))
+    plate_z = rh - drop          # ball arrives at plate at this height
+
+    # SVG layout — 60 ft of distance maps to width-px, 0 to 6 ft maps to height-px (flipped)
+    pad_l, pad_r, pad_t, pad_b = 14, 8, 22, 18
+    inner_w = width - pad_l - pad_r
+    inner_h = height - pad_t - pad_b
+    def _x(d_ft):  # 0 ft = release, 60 ft = plate
+        return pad_l + inner_w * (d_ft / 60.0)
+    def _y(z_ft):  # 0 ft = bottom, 6 ft = top
+        return pad_t + inner_h * (1.0 - z_ft / 6.0)
+
+    # Strike zone band (1.5 ft to 3.5 ft at the plate)
+    sz_y_top = _y(3.5); sz_y_bot = _y(1.5)
+    plate_x  = _x(60.5)
+    # Release point
+    rel_x = _x(60.5 - rel_dist)   # release is at distance = ext from rubber
+    rel_y = _y(rh)
+    end_x = plate_x; end_y = _y(plate_z)
+
+    # Parabolic trajectory between rel and end (Magnus + gravity proxy)
+    # We sample 12 points along a quadratic Bezier through a control point
+    # offset by IVB direction (upward IVB = control point pushed UP).
+    ctrl_x = (rel_x + end_x) / 2
+    # Vertical break flattens the descent; positive ivb (rising) pushes
+    # the control point HIGHER (less drop mid-flight).
+    ctrl_y = (rel_y + end_y) / 2 - (ivb * 0.6)
+    pts = []
+    for k in range(13):
+        t = k / 12.0
+        bx = (1-t)**2 * rel_x + 2*(1-t)*t * ctrl_x + t**2 * end_x
+        by = (1-t)**2 * rel_y + 2*(1-t)*t * ctrl_y + t**2 * end_y
+        pts.append((bx, by))
+
+    # Color the trajectory by VAA bucket (steeper → bluer, flatter → gold)
+    def _vaa_color(a):
+        a = abs(float(a))
+        if a <= 4.5: return "#d4a848"   # very flat (good rising FB)
+        if a <= 5.5: return "#c0a878"
+        if a <= 6.5: return "#8aaab8"
+        if a <= 7.5: return "#7090b8"
+        return "#6080b0"
+    traj_color = _vaa_color(vaa)
+
+    parts = [
+        f'<svg width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" '
+        f'style="display:block;margin:8px auto 0 auto;background:#0a1218;'
+        f'border-radius:6px">',
+        f'<text x="{width//2}" y="14" font-family="JetBrains Mono,monospace" '
+        f'font-size="10" font-weight="700" fill="#8aaab8" '
+        f'letter-spacing="1.5" text-anchor="middle">{title}</text>',
+        # ground line
+        f'<line x1="{pad_l}" y1="{_y(0)}" x2="{width-pad_r}" y2="{_y(0)}" '
+        f'stroke="#2a3a50" stroke-width="1"/>',
+        # strike zone band
+        f'<rect x="{plate_x - 3}" y="{sz_y_top}" width="6" '
+        f'height="{sz_y_bot - sz_y_top}" '
+        f'fill="#c4914820" stroke="#c0a878" stroke-width="1.2"/>',
+        # plate marker
+        f'<line x1="{plate_x}" y1="{_y(0)}" x2="{plate_x}" y2="{_y(0.2)}" '
+        f'stroke="#c0a878" stroke-width="2"/>',
+        # release point
+        f'<circle cx="{rel_x}" cy="{rel_y}" r="4" fill="{traj_color}" '
+        f'stroke="white" stroke-width="0.7"/>',
+        # trajectory polyline
+        '<polyline points="' +
+        " ".join(f"{x:.1f},{y:.1f}" for x, y in pts) +
+        f'" fill="none" stroke="{traj_color}" stroke-width="2.4" '
+        f'opacity="0.9"/>',
+        # arriving point
+        f'<circle cx="{end_x}" cy="{end_y}" r="3.5" fill="{traj_color}" '
+        f'stroke="white" stroke-width="0.6"/>',
+        # VAA label
+        f'<text x="{width-pad_r}" y="{height-4}" font-family="JetBrains Mono,monospace" '
+        f'font-size="9" fill="#7a9ab0" text-anchor="end">'
+        f'VAA {vaa:.1f}°  ·  velo {velo:.0f}</text>',
+        # rel height label
+        f'<text x="{pad_l}" y="{height-4}" font-family="JetBrains Mono,monospace" '
+        f'font-size="9" fill="#7a9ab0" text-anchor="start">'
+        f'release {rh:.2f} ft</text>',
+        '</svg>',
+    ]
+    return "".join(parts)
+
+
 def _render_zone_heatmap_svg(zone_scores: dict, title: str,
                                 width: int = 220, cell_size: int = 38,
-                                zone_coverage: dict = None) -> str:
-    """Build an inline SVG heatmap from {zone_int: stuff_plus} dict.
+                                zone_coverage: dict = None,
+                                anchor_lo: float = 80.0,
+                                anchor_hi: float = 130.0,
+                                uncertainty: dict = None) -> str:
+    """Build an inline SVG heatmap from {zone_int: value} dict.
 
-    zone_coverage: optional {zone_int: int} = training-sample count per cell.
-        If provided, cells with low coverage are rendered with reduced opacity
-        to signal lower confidence (v6++ improvement #8).
+    Args
+    ----
+    zone_scores: required, the cell values
+    title: small label above the grid
+    zone_coverage: optional {zone_int: int} = training-sample count.
+                    Low-coverage cells render with reduced opacity.
+    anchor_lo, anchor_hi: floor/ceiling of the color gradient. Use
+                          per-pitch-type (μ ± 1.5σ) for #2.
+    uncertainty: optional {zone_int: ci_width} = P90-P10 width per cell
+                 (from v6 bundle quantile heads). Used to fade cells
+                 where the model is uncertain (#6 inference).
 
-    Returns HTML string suitable for st.markdown(unsafe_allow_html=True).
+    Each cell renders a `<title>` element with the value, coverage, and
+    CI width so coaches can hover to get more context (#10).
     """
     # 5×5 grid + label area
     grid_w = cell_size * 5
@@ -2819,26 +3201,44 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
             y = pad_top + ri * cell_size
             sp = zone_scores.get(zone) if zone_scores else None
             is_inside = zone in _INSIDE_ZONES
-            fill = _zone_color(sp, is_inside)
+            fill = _zone_color(sp, is_inside,
+                                 anchor_lo=anchor_lo, anchor_hi=anchor_hi)
             stroke = "#2a3a50" if is_inside else "#1a2a40"
             stroke_w = 1.0
-            # v6++ #8: opacity based on training coverage of this cell
+            # Opacity from BOTH training coverage (#8) AND model
+            # uncertainty (#6 inf). Take the minimum so the cell fades
+            # whichever signal is weaker.
             opacity = 1.0
-            if zone_coverage is not None:
-                cov = zone_coverage.get(zone, 0)
-                if cov < 100:
-                    opacity = 0.35
-                elif cov < 500:
-                    opacity = 0.65
-                elif cov < 2000:
-                    opacity = 0.85
+            cov = (zone_coverage or {}).get(zone, 0)
+            if cov < 100:    opacity = min(opacity, 0.35)
+            elif cov < 500:  opacity = min(opacity, 0.65)
+            elif cov < 2000: opacity = min(opacity, 0.85)
+            ci_w = (uncertainty or {}).get(zone) if uncertainty else None
+            if ci_w is not None:
+                # Wide CI → fade. v6 quantile outputs sit on the same
+                # 100/10 display scale → CI width >= 25 means very
+                # uncertain; <= 8 means tight.
+                if   ci_w >= 25:  opacity = min(opacity, 0.40)
+                elif ci_w >= 15:  opacity = min(opacity, 0.70)
+                elif ci_w >= 10:  opacity = min(opacity, 0.90)
+            # Build hover tooltip (#10) — title elements work in modern
+            # browsers and most embeds; gracefully no-op when blocked.
+            _tip_bits = []
+            if sp is not None:
+                _tip_bits.append(f"value: {sp:.1f}")
+            if ci_w is not None:
+                _tip_bits.append(f"CI ±{ci_w/2:.1f}")
+            if cov:
+                _tip_bits.append(f"{cov} training pitches")
+            _tip = " · ".join(_tip_bits) if _tip_bits else "no data"
             svg_parts.append(
                 f'<rect x="{x}" y="{y}" width="{cell_size}" height="{cell_size}" '
                 f'opacity="{opacity}" '
-                f'fill="{fill}" stroke="{stroke}" stroke-width="{stroke_w}"/>'
+                f'fill="{fill}" stroke="{stroke}" stroke-width="{stroke_w}">'
+                f'<title>{_tip}</title>'
+                f'</rect>'
             )
             if sp is not None:
-                # Display value, scaled font
                 txt_color = "#0a1018" if (sp >= 105 and is_inside) else \
                               ("#d4dae0" if is_inside else "#8a98a8")
                 font_w = 700 if is_inside else 500
@@ -6450,6 +6850,14 @@ elif st.session_state.screen == "dmstuff":
                         if not _sub.empty:
                             _row = _sub.sort_values("year", ascending=False).iloc[0]
                             _hand_val = str(_row.get("hand", "R")).upper()[:1]
+                            # ── Sign-convention conversions ─────────────
+                            # pitcher_profiles.csv stores:
+                            #   hb_<group> in GLOVE-SIDE-POSITIVE (the v8c
+                            #     model's internal convention) → negate to
+                            #     get the calculator's arm-side-positive.
+                            #   rel_side  in RAW STATCAST (RHP negative,
+                            #     LHP positive for arm-side) → take abs()
+                            #     so user field is always arm-side magnitude.
                             _pending_pitches = []
                             for _grp_lp in PITCH_GROUPS:
                                 _n = _row.get(f"n_{_grp_lp}")
@@ -6462,15 +6870,22 @@ elif st.session_state.screen == "dmstuff":
                                                       ("pct",       "usage")]:
                                         _val = _row.get(f"{_src}_{_grp_lp}")
                                         if pd.notna(_val):
+                                            _val_f = float(_val)
                                             if _src == "pct":
-                                                _vals_lp[_f] = f"{float(_val)*100:.1f}"
+                                                _vals_lp[_f] = f"{_val_f*100:.1f}"
+                                            elif _src == "hb":
+                                                # Glove-side+ → arm-side+
+                                                _vals_lp[_f] = f"{-_val_f:.2f}"
                                             else:
-                                                _vals_lp[_f] = f"{float(_val):.2f}"
+                                                _vals_lp[_f] = f"{_val_f:.2f}"
                                     _pending_pitches.append((_grp_lp, _vals_lp))
+                            _rs_csv = _row.get("rel_side")
+                            _rs_user = (abs(float(_rs_csv))
+                                          if pd.notna(_rs_csv) else None)
                             st.session_state["_dm_pending_load"] = {
                                 "hand":        "LHP" if _hand_val == "L" else "RHP",
                                 "rh":          (float(_row["rel_height"]) if pd.notna(_row.get("rel_height")) else None),
-                                "rs":          (float(_row["rel_side"])   if pd.notna(_row.get("rel_side"))   else None),
+                                "rs":          _rs_user,
                                 "ext":         (float(_row["extension"])  if pd.notna(_row.get("extension"))  else None),
                                 "pitches":     _pending_pitches,
                                 "data_source": _DATA_SOURCES[0],
@@ -6694,17 +7109,66 @@ elif st.session_state.screen == "dmstuff":
                             ]
                             _share_qs[f"p_{g}"] = ",".join(str(v) for v in _vals)
                         _qs = _urlparse.urlencode(_share_qs)
-                        if st.button("🔗 Copy share link", key="dm_share_btn", width='stretch'):
+                        if st.button("🔗 Get share link", key="dm_share_btn", width='stretch'):
                             st.session_state["_dm_share_qs"] = _qs
                             st.rerun()
                     if st.session_state.get("_dm_share_qs"):
-                        st.code(f"?{st.session_state['_dm_share_qs']}", language=None)
-                        st.markdown(
-                            "<div style='font-family:JetBrains Mono,monospace;font-size:9px;"
-                            "color:#5a7a90;margin-top:2px'>Append to your app URL to "
-                            "restore this arsenal.</div>",
-                            unsafe_allow_html=True,
-                        )
+                        # Render a JS-driven box that builds the FULL URL
+                        # client-side from window.parent.location, so the
+                        # user gets a clickable link with no manual
+                        # "append this to your app URL" step.
+                        import streamlit.components.v1 as _components
+                        _qs_js = st.session_state["_dm_share_qs"].replace("\\", "\\\\").replace("'", "\\'")
+                        _components.html(f"""
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px">
+  <div style="display:flex;gap:6px">
+    <input id="_dm_share_link_in" type="text" readonly
+      style="flex:1;background:#0a1218;color:#a0c0d4;border:1px solid #1a2a40;
+             border-radius:6px;padding:8px 12px;font-family:inherit;
+             font-size:11px;outline:none"/>
+    <button onclick="_dmCopyShareLink()"
+      style="background:#1a2a40;color:#c0d8e8;border:1px solid #2a4a6a;
+             border-radius:6px;padding:8px 14px;font-family:'Inter',sans-serif;
+             font-size:11px;font-weight:600;cursor:pointer">Copy</button>
+  </div>
+  <div id="_dm_share_status" style="color:#5a7a90;font-size:9px;margin-top:6px">
+    Anyone with this link opens the calculator with this arsenal pre-filled.
+  </div>
+</div>
+<script>
+(function() {{
+  const inp = document.getElementById('_dm_share_link_in');
+  let baseUrl;
+  try {{
+    baseUrl = window.parent.location.origin + window.parent.location.pathname;
+  }} catch (e) {{
+    baseUrl = window.location.origin + window.location.pathname;
+  }}
+  inp.value = baseUrl + '?' + '{_qs_js}';
+}})();
+function _dmCopyShareLink() {{
+  const inp = document.getElementById('_dm_share_link_in');
+  const status = document.getElementById('_dm_share_status');
+  inp.select(); inp.setSelectionRange(0, 99999);
+  const finish = (ok) => {{
+    status.textContent = ok
+      ? '✓ Copied to clipboard — paste anywhere.'
+      : 'Could not copy. Select the link manually and copy.';
+    status.style.color = ok ? '#5ac8a0' : '#d48a8a';
+  }};
+  if (navigator.clipboard && navigator.clipboard.writeText) {{
+    navigator.clipboard.writeText(inp.value).then(
+      () => finish(true),
+      () => {{ try {{ document.execCommand('copy'); finish(true); }}
+               catch(e) {{ finish(false); }} }}
+    );
+  }} else {{
+    try {{ document.execCommand('copy'); finish(true); }}
+    catch(e) {{ finish(false); }}
+  }}
+}}
+</script>
+""", height=86)
 
                 # ── Save & Compare arsenals (#7) ──────────────────────────
                 # Persisted only for the current session. Coaches can save a
@@ -7700,7 +8164,78 @@ elif st.session_state.screen == "dmstuff":
                         "</div>",
                         unsafe_allow_html=True,
                     )
-    
+
+                    # ── Heatmap controls (#1 inf, #5) ──────────────────
+                    # Metric toggle: only the composite Stuff+ option is
+                    # meaningful when a v5 bundle is loaded; v6 unlocks
+                    # the three diagnostic heads. The widget always
+                    # renders but greys non-Stuff+ options for v5.
+                    _zb_is_v6 = str((_zone_bundle or {}).get("version", "")).startswith("zone_v6")
+                    _hm_l, _hm_r = st.columns([3, 2])
+                    with _hm_l:
+                        _metric_opts = {
+                            "stuff_plus": "Stuff+",
+                            "whiff":      "Whiff% (v6)",
+                            "csw":        "CSW% (v6)",
+                            "xwoba":      "xwOBA (v6)",
+                        }
+                        if _zb_is_v6:
+                            _metric_choice = st.radio(
+                                "Heatmap metric",
+                                options=list(_metric_opts.keys()),
+                                format_func=lambda k: _metric_opts[k],
+                                horizontal=True, key="_hm_metric",
+                                index=0,
+                                help=("Stuff+ = composite of CSW + Whiff + "
+                                      "xwOBA + xRV.  Whiff%, CSW%, xwOBA are "
+                                      "single-metric heads (v6 bundle)."),
+                            )
+                        else:
+                            _metric_choice = "stuff_plus"
+                            st.markdown(
+                                "<div class='note-mono' style='padding-top:4px'>"
+                                "Metric: <b>Stuff+</b> (v5 bundle — train "
+                                "<code>zone_stuff_v6</code> to unlock Whiff% / "
+                                "CSW% / xwOBA diagnostic heads)"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
+                    with _hm_r:
+                        _count_choice = st.radio(
+                            "Approach",
+                            options=["neutral", "get_ahead", "putaway"],
+                            format_func=lambda k: {
+                                "neutral": "Neutral (1-1)",
+                                "get_ahead": "Get-Ahead (0-0)",
+                                "putaway": "Putaway (0-2)",
+                            }[k],
+                            horizontal=True, key="_hm_count",
+                            index=0,
+                            help=("Plugs different count-state defaults into "
+                                  "the model so the heatmap reflects a "
+                                  "specific approach. Putaway shifts breaking "
+                                  "balls below the zone; Get-Ahead favours "
+                                  "in-zone called-strike locations."),
+                        )
+
+                    # Optional batter input (#7) — adjustment applies only
+                    # when a precomputed batter_zone_tendencies table is
+                    # available in models/. Otherwise this is a no-op.
+                    import os as _os_bt
+                    _has_batter_tbl = _os_bt.path.exists(
+                        "models/batter_zone_tendencies.parquet"
+                    )
+                    _batter_id_input = ""
+                    if _has_batter_tbl:
+                        _batter_id_input = st.text_input(
+                            "Batter ID (optional)",
+                            value="", key="_hm_batter_id",
+                            placeholder="MLB batter_id to adjust heatmap to",
+                            help=("If provided, heatmap cells are nudged by "
+                                  "this batter's chase / contact tendencies "
+                                  "by zone vs this pitch type. Capped at ±15%."),
+                        )
+
                     for group in _c_added:
                         if group not in _scores:
                             continue
@@ -7871,6 +8406,12 @@ elif st.session_state.screen == "dmstuff":
                                     if not _sub_lp.empty:
                                         _row_lp = _sub_lp.iloc[0]
                                         _h_lp = str(_row_lp.get("hand","R")).upper()[:1]
+                                        # Same sign-conversion rules as the
+                                        # "Apply pitcher" handler above —
+                                        # CSV stores HB as glove-side-positive
+                                        # and rel_side as raw Statcast, but
+                                        # the calculator fields expect
+                                        # arm-side-positive for both.
                                         _pending_pitches_nn = []
                                         for _grp_lp in PITCH_GROUPS:
                                             _n = _row_lp.get(f"n_{_grp_lp}")
@@ -7884,17 +8425,22 @@ elif st.session_state.screen == "dmstuff":
                                                         ("pct",       "usage")]:
                                                     _val = _row_lp.get(f"{_src}_{_grp_lp}")
                                                     if pd.notna(_val):
+                                                        _val_f = float(_val)
                                                         if _src == "pct":
-                                                            _vals_nn[_f] = f"{float(_val)*100:.1f}"
+                                                            _vals_nn[_f] = f"{_val_f*100:.1f}"
+                                                        elif _src == "hb":
+                                                            _vals_nn[_f] = f"{-_val_f:.2f}"
                                                         else:
-                                                            _vals_nn[_f] = f"{float(_val):.2f}"
+                                                            _vals_nn[_f] = f"{_val_f:.2f}"
                                                 _pending_pitches_nn.append((_grp_lp, _vals_nn))
+                                        _rs_nn_csv = _row_lp.get("rel_side")
+                                        _rs_nn_user = (abs(float(_rs_nn_csv))
+                                                          if pd.notna(_rs_nn_csv) else None)
                                         st.session_state["_dm_pending_load"] = {
                                             "hand":        "LHP" if _h_lp == "L" else "RHP",
                                             "rh":          (float(_row_lp["rel_height"])
                                                               if pd.notna(_row_lp.get("rel_height")) else None),
-                                            "rs":          (float(_row_lp["rel_side"])
-                                                              if pd.notna(_row_lp.get("rel_side")) else None),
+                                            "rs":          _rs_nn_user,
                                             "ext":         (float(_row_lp["extension"])
                                                               if pd.notna(_row_lp.get("extension")) else None),
                                             "pitches":     _pending_pitches_nn,
@@ -7909,21 +8455,56 @@ elif st.session_state.screen == "dmstuff":
                         # Zone-Stuff+ heatmaps
                         if _ZONE_AVAILABLE and "shape_row" in _scores[group]:
                             shape_row = _scores[group]["shape_row"]
-                            zone_grid = _score_zone_grid(shape_row, pitcher_hand=_hcode)
-                            _z_cov_all = (_zone_bundle or {}).get("zone_coverage") or {}
-                            _z_cov = _z_cov_all.get(group) if isinstance(_z_cov_all, dict) else None
+                            zone_grid = _score_zone_grid(
+                                shape_row, pitcher_hand=_hcode,
+                                metric=_metric_choice,
+                                count_mode=_count_choice,
+                                apply_shrinkage=True,
+                            )
                             if zone_grid:
+                                _anchor = zone_grid.get("anchor", (80.0, 130.0))
+                                _z_cov = zone_grid.get("coverage") or {}
+                                _unc = zone_grid.get("uncertainty")
+                                # Per-batter adjustment (#7) — no-op when
+                                # no batter ID + lookup table available.
+                                if _batter_id_input.strip():
+                                    _bt_lookup = _load_batter_zone_lookup(
+                                        _batter_id_input.strip(), group,
+                                    )
+                                    if _bt_lookup:
+                                        zone_grid["vs_rhb"] = _apply_batter_adjustment(
+                                            zone_grid["vs_rhb"], _bt_lookup, group)
+                                        zone_grid["vs_lhb"] = _apply_batter_adjustment(
+                                            zone_grid["vs_lhb"], _bt_lookup, group)
+                                _metric_lbl = {
+                                    "stuff_plus": "Stuff+",
+                                    "whiff":      "Whiff%",
+                                    "csw":        "CSW%",
+                                    "xwoba":      "xwOBA",
+                                }.get(_metric_choice, "Stuff+")
                                 hm_rhb = _render_zone_heatmap_svg(
-                                    zone_grid["vs_rhb"], "vs RHB", zone_coverage=_z_cov,
+                                    zone_grid["vs_rhb"], f"vs RHB · {_metric_lbl}",
+                                    zone_coverage=_z_cov,
+                                    anchor_lo=_anchor[0], anchor_hi=_anchor[1],
+                                    uncertainty=(_unc or {}).get("vs_rhb") if _unc else None,
                                 )
                                 hm_lhb = _render_zone_heatmap_svg(
-                                    zone_grid["vs_lhb"], "vs LHB", zone_coverage=_z_cov,
+                                    zone_grid["vs_lhb"], f"vs LHB · {_metric_lbl}",
+                                    zone_coverage=_z_cov,
+                                    anchor_lo=_anchor[0], anchor_hi=_anchor[1],
+                                    uncertainty=(_unc or {}).get("vs_lhb") if _unc else None,
                                 )
-                                hm_cols = st.columns([1, 1])
+                                # Side-view trajectory (#11)
+                                _side = _render_side_view_svg(
+                                    shape_row, title=f"{group} — Side View",
+                                )
+                                hm_cols = st.columns([1, 1, 1])
                                 with hm_cols[0]:
                                     st.markdown(hm_rhb, unsafe_allow_html=True)
                                 with hm_cols[1]:
                                     st.markdown(hm_lhb, unsafe_allow_html=True)
+                                with hm_cols[2]:
+                                    st.markdown(_side, unsafe_allow_html=True)
                                 st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
 
