@@ -3083,29 +3083,27 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
     total_h = pad_top + grid_h + pad_bottom
 
     # ── Build dense source matrices from the 5×5 cell grid ──────────
-    # Bilinear interpolation up to SUB×SUB sub-pixels gives a true
-    # continuous gradient before the final smoothing blur. The previous
-    # version blurred a 5×5 source which left visible block artefacts;
-    # this one interpolates the value (and opacity) at every sub-pixel
-    # location so the source is already smooth.
-    SUB = 22                                        # sub-grid resolution
+    # Bilinear interpolation up to SUB×SUB sub-pixels produces a fully
+    # continuous gradient. No SVG blur needed — the interp itself
+    # eliminates source-block tells.
+    SUB = 28                                        # sub-grid resolution
     src_v   = [[None] * 5 for _ in range(5)]        # source value matrix
     src_op  = [[1.0]  * 5 for _ in range(5)]        # source opacity matrix
     for ri, row in enumerate(_ZONE_GRID):
         for ci, zone in enumerate(row):
             sp = zone_scores.get(zone) if zone_scores else None
             src_v[ri][ci] = sp
-            # Pre-compute per-cell opacity from coverage + uncertainty
+            # Coverage and uncertainty fade are CAPPED at much higher
+            # opacity floors than before — coaches need to see the
+            # whole heatmap, not lose the outer-zone half to fade.
             op = 1.0
             cov = (zone_coverage or {}).get(zone, 0)
-            if cov < 100:    op = min(op, 0.35)
-            elif cov < 500:  op = min(op, 0.65)
-            elif cov < 2000: op = min(op, 0.85)
+            if cov < 100:    op = min(op, 0.70)
+            elif cov < 500:  op = min(op, 0.85)
             ci_w = (uncertainty or {}).get(zone) if uncertainty else None
             if ci_w is not None:
-                if   ci_w >= 25: op = min(op, 0.40)
-                elif ci_w >= 15: op = min(op, 0.70)
-                elif ci_w >= 10: op = min(op, 0.90)
+                if   ci_w >= 25: op = min(op, 0.70)
+                elif ci_w >= 15: op = min(op, 0.85)
             src_op[ri][ci] = op
 
     def _bilinear(grid, di, dj, default=None):
@@ -3130,43 +3128,28 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
             den += w
         return (num / den) if den > 0 else default
 
-    # ── SVG header with a heavier two-stage smoothing filter ─────────
-    # Two cascaded Gaussian blurs produce a more organic falloff than a
-    # single hard blur and avoid the slight rectangular tells that
-    # remain at sharp boundaries.
-    _blur_sd = max(1.2, cell_size * 0.12)
+    # ── SVG header (no blur — interpolation does the smoothing) ──────
     svg_parts = [
         f'<svg width="{grid_w}" height="{total_h}" '
         f'viewBox="0 0 {grid_w} {total_h}" '
         f'xmlns="http://www.w3.org/2000/svg" '
-        f'shape-rendering="crispEdges" '
-        f'style="display:block;margin:0 auto">',
+        f'style="display:block;margin:0 auto;border-radius:6px;'
+        f'background:#0a1218">',
         f'<text x="{grid_w//2}" y="16" font-family="JetBrains Mono,monospace" '
         f'font-size="11" font-weight="700" fill="#8aaab8" '
         f'letter-spacing="1.5" text-anchor="middle">{title}</text>',
-        # Filter: two-pass Gaussian for organic smoothness, kept tight
-        # since the source is already dense via bilinear interpolation.
-        f'<defs>'
-        f'<filter id="hm_blur" x="-8%" y="-8%" width="116%" height="116%">'
-        f'<feGaussianBlur in="SourceGraphic" stdDeviation="{_blur_sd:.2f}" result="b1"/>'
-        f'<feGaussianBlur in="b1"            stdDeviation="{_blur_sd*0.5:.2f}"/>'
-        f'</filter>'
-        f'</defs>',
-        '<g filter="url(#hm_blur)">',
     ]
 
     # ── Render the dense sub-grid ────────────────────────────────────
-    # Each sub-pixel rect overlaps its neighbours slightly so adjacent
-    # colors blend without seam lines surviving the blur.
+    # Each sub-pixel rect overlaps its neighbours by 1px so no seams
+    # survive even at the smallest render sizes.
     px_w = grid_w / SUB
     px_h = (5 * cell_size) / SUB
-    _overdraw = 0.4
+    _overdraw = 1.0
     for di in range(SUB):
         gi = (di / max(SUB - 1, 1)) * 4.0
         for dj in range(SUB):
             gj = (dj / max(SUB - 1, 1)) * 4.0
-            # Sample at (gi, gj). Note coordinate order: SVG x=column, y=row,
-            # so the column axis (dj) drives the source `cj`, not `ci`.
             val = _bilinear(src_v, gi, gj)
             if val is None:
                 continue
@@ -3181,9 +3164,6 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
                 f'height="{px_h + _overdraw:.2f}" '
                 f'opacity="{op:.2f}" fill="{color}"/>'
             )
-
-    # Close blurred group; strike-zone outline goes OUTSIDE so it stays crisp.
-    svg_parts.append('</g>')
 
     # Strike zone boundary (between rows 1-3 and cols 1-3)
     sz_x = cell_size
