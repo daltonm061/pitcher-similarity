@@ -3082,6 +3082,11 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
     pad_bottom = 4
     total_h = pad_top + grid_h + pad_bottom
 
+    # SVG filter applies a small Gaussian blur to the whole heatmap
+    # group so neighbouring cells visually bleed into each other,
+    # producing the smooth-gradient look. The blur stdDeviation is
+    # tuned so cell boundaries vanish but the overall pattern stays.
+    _blur_sd = max(2.0, cell_size * 0.18)
     svg_parts = [
         f'<svg width="{grid_w}" height="{total_h}" '
         f'viewBox="0 0 {grid_w} {total_h}" '
@@ -3091,6 +3096,11 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
         f'<text x="{grid_w//2}" y="16" font-family="JetBrains Mono,monospace" '
         f'font-size="11" font-weight="700" fill="#8aaab8" '
         f'letter-spacing="1.5" text-anchor="middle">{title}</text>',
+        # Smoothing filter
+        f'<defs><filter id="hm_blur" x="-10%" y="-10%" width="120%" height="120%">'
+        f'<feGaussianBlur in="SourceGraphic" stdDeviation="{_blur_sd:.1f}"/>'
+        f'</filter></defs>',
+        '<g filter="url(#hm_blur)">',
     ]
 
     for ri, row in enumerate(_ZONE_GRID):
@@ -3101,11 +3111,7 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
             is_inside = zone in _INSIDE_ZONES
             fill = _zone_color(sp, is_inside,
                                  anchor_lo=anchor_lo, anchor_hi=anchor_hi)
-            stroke = "#2a3a50" if is_inside else "#1a2a40"
-            stroke_w = 1.0
-            # Opacity from BOTH training coverage (#8) AND model
-            # uncertainty (#6 inf). Take the minimum so the cell fades
-            # whichever signal is weaker.
+            # Opacity from BOTH training coverage and uncertainty.
             opacity = 1.0
             cov = (zone_coverage or {}).get(zone, 0)
             if cov < 100:    opacity = min(opacity, 0.35)
@@ -3113,39 +3119,21 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
             elif cov < 2000: opacity = min(opacity, 0.85)
             ci_w = (uncertainty or {}).get(zone) if uncertainty else None
             if ci_w is not None:
-                # Wide CI → fade. v6 quantile outputs sit on the same
-                # 100/10 display scale → CI width >= 25 means very
-                # uncertain; <= 8 means tight.
                 if   ci_w >= 25:  opacity = min(opacity, 0.40)
                 elif ci_w >= 15:  opacity = min(opacity, 0.70)
                 elif ci_w >= 10:  opacity = min(opacity, 0.90)
-            # Build hover tooltip (#10) — title elements work in modern
-            # browsers and most embeds; gracefully no-op when blocked.
-            _tip_bits = []
-            if sp is not None:
-                _tip_bits.append(f"value: {sp:.1f}")
-            if ci_w is not None:
-                _tip_bits.append(f"CI ±{ci_w/2:.1f}")
-            if cov:
-                _tip_bits.append(f"{cov} training pitches")
-            _tip = " · ".join(_tip_bits) if _tip_bits else "no data"
+            # Slightly oversize each cell so the blurred halos overlap
+            # cleanly and there are no thin gaps at boundaries.
+            _ox = cell_size * 0.10
             svg_parts.append(
-                f'<rect x="{x}" y="{y}" width="{cell_size}" height="{cell_size}" '
-                f'opacity="{opacity}" '
-                f'fill="{fill}" stroke="{stroke}" stroke-width="{stroke_w}">'
-                f'<title>{_tip}</title>'
-                f'</rect>'
+                f'<rect x="{x - _ox/2:.1f}" y="{y - _ox/2:.1f}" '
+                f'width="{cell_size + _ox:.1f}" height="{cell_size + _ox:.1f}" '
+                f'opacity="{opacity}" fill="{fill}"/>'
             )
-            if sp is not None:
-                txt_color = "#0a1018" if (sp >= 105 and is_inside) else \
-                              ("#d4dae0" if is_inside else "#8a98a8")
-                font_w = 700 if is_inside else 500
-                svg_parts.append(
-                    f'<text x="{x + cell_size//2}" y="{y + cell_size//2 + 4}" '
-                    f'font-family="Inter,sans-serif" font-size="12" '
-                    f'font-weight="{font_w}" fill="{txt_color}" '
-                    f'text-anchor="middle">{int(round(sp))}</text>'
-                )
+
+    # Close the blurred-group + render the strike-zone boundary OUTSIDE
+    # the blur filter so it stays a crisp gold rectangle.
+    svg_parts.append('</g>')
 
     # Strike zone boundary (between rows 1-3 and cols 1-3)
     sz_x = cell_size
@@ -8063,76 +8051,13 @@ function _dmCopyShareLink() {{
                         unsafe_allow_html=True,
                     )
 
-                    # ── Heatmap controls (#1 inf, #5) ──────────────────
-                    # Metric toggle: only the composite Stuff+ option is
-                    # meaningful when a v5 bundle is loaded; v6 unlocks
-                    # the three diagnostic heads. The widget always
-                    # renders but greys non-Stuff+ options for v5.
-                    _zb_is_v6 = str((_zone_bundle or {}).get("version", "")).startswith("zone_v6")
-                    _hm_l, _hm_r = st.columns([3, 2])
-                    with _hm_l:
-                        _metric_opts = {
-                            "stuff_plus": "Stuff+",
-                            "whiff":      "Whiff% (v6)",
-                            "csw":        "CSW% (v6)",
-                            "xwoba":      "xwOBA (v6)",
-                        }
-                        if _zb_is_v6:
-                            _metric_choice = st.radio(
-                                "Heatmap metric",
-                                options=list(_metric_opts.keys()),
-                                format_func=lambda k: _metric_opts[k],
-                                horizontal=True, key="_hm_metric",
-                                index=0,
-                                help=("Stuff+ = composite of CSW + Whiff + "
-                                      "xwOBA + xRV.  Whiff%, CSW%, xwOBA are "
-                                      "single-metric heads (v6 bundle)."),
-                            )
-                        else:
-                            _metric_choice = "stuff_plus"
-                            st.markdown(
-                                "<div class='note-mono' style='padding-top:4px'>"
-                                "Metric: <b>Stuff+</b> (v5 bundle — train "
-                                "<code>zone_stuff_v6</code> to unlock Whiff% / "
-                                "CSW% / xwOBA diagnostic heads)"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-                    with _hm_r:
-                        _count_choice = st.radio(
-                            "Approach",
-                            options=["neutral", "get_ahead", "putaway"],
-                            format_func=lambda k: {
-                                "neutral": "Neutral (1-1)",
-                                "get_ahead": "Get-Ahead (0-0)",
-                                "putaway": "Putaway (0-2)",
-                            }[k],
-                            horizontal=True, key="_hm_count",
-                            index=0,
-                            help=("Plugs different count-state defaults into "
-                                  "the model so the heatmap reflects a "
-                                  "specific approach. Putaway shifts breaking "
-                                  "balls below the zone; Get-Ahead favours "
-                                  "in-zone called-strike locations."),
-                        )
-
-                    # Optional batter input (#7) — adjustment applies only
-                    # when a precomputed batter_zone_tendencies table is
-                    # available in models/. Otherwise this is a no-op.
-                    import os as _os_bt
-                    _has_batter_tbl = _os_bt.path.exists(
-                        "models/batter_zone_tendencies.parquet"
-                    )
+                    # Heatmap controls removed — single composite Stuff+ view
+                    # with a neutral-count default. Keeps the rendering path
+                    # simple and lets coaches focus on shape vs zone signal
+                    # without toggle paralysis.
+                    _metric_choice = "stuff_plus"
+                    _count_choice  = "neutral"
                     _batter_id_input = ""
-                    if _has_batter_tbl:
-                        _batter_id_input = st.text_input(
-                            "Batter ID (optional)",
-                            value="", key="_hm_batter_id",
-                            placeholder="MLB batter_id to adjust heatmap to",
-                            help=("If provided, heatmap cells are nudged by "
-                                  "this batter's chase / contact tendencies "
-                                  "by zone vs this pitch type. Capped at ±15%."),
-                        )
 
                     for group in _c_added:
                         if group not in _scores:
@@ -8374,20 +8299,14 @@ function _dmCopyShareLink() {{
                                             zone_grid["vs_rhb"], _bt_lookup, group)
                                         zone_grid["vs_lhb"] = _apply_batter_adjustment(
                                             zone_grid["vs_lhb"], _bt_lookup, group)
-                                _metric_lbl = {
-                                    "stuff_plus": "Stuff+",
-                                    "whiff":      "Whiff%",
-                                    "csw":        "CSW%",
-                                    "xwoba":      "xwOBA",
-                                }.get(_metric_choice, "Stuff+")
                                 hm_rhb = _render_zone_heatmap_svg(
-                                    zone_grid["vs_rhb"], f"vs RHB · {_metric_lbl}",
+                                    zone_grid["vs_rhb"], "vs RHB",
                                     zone_coverage=_z_cov,
                                     anchor_lo=_anchor[0], anchor_hi=_anchor[1],
                                     uncertainty=(_unc or {}).get("vs_rhb") if _unc else None,
                                 )
                                 hm_lhb = _render_zone_heatmap_svg(
-                                    zone_grid["vs_lhb"], f"vs LHB · {_metric_lbl}",
+                                    zone_grid["vs_lhb"], "vs LHB",
                                     zone_coverage=_z_cov,
                                     anchor_lo=_anchor[0], anchor_hi=_anchor[1],
                                     uncertainty=(_unc or {}).get("vs_lhb") if _unc else None,
