@@ -2895,24 +2895,27 @@ def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R",
 
 def _zone_color(stuff_plus_val: float, is_inside_zone: bool = True,
                  anchor_lo: float = 80.0, anchor_hi: float = 130.0) -> str:
-    """Map a value to a heatmap color along the cool→gold gradient.
+    """Map a value to a heatmap color along a diverging blue→red palette.
+
+    Convention: red = better for the pitcher (higher Stuff+), blue =
+    worse. The mid-tone is a desaturated near-white so the eye reads
+    "average" without distraction. With bilinear interpolation +
+    Gaussian blur applied at render time, this produces a clean
+    photographic-quality heatmap.
 
     Args
     ----
-    stuff_plus_val: value to color
-    is_inside_zone: in-zone cells stay saturated, out-of-zone cells are
-                     dimmed by mixing with the dark background
-    anchor_lo, anchor_hi: the floor and ceiling of the color scale.
-                          Default (80, 130) is league-wide Stuff+.
+    stuff_plus_val: value to color (None → empty background)
+    is_inside_zone: kept for backwards compatibility, no longer affects
+                     color — the gold strike-zone outline drawn over
+                     the gradient marks the zone visually
+    anchor_lo, anchor_hi: floor and ceiling of the gradient scale.
                           For per-pitch-type centering (#2), pass
-                          (mu - 1.5*sd, mu + 1.5*sd) so the gradient
-                          anchors to *this pitch type's* distribution
-                          rather than the global one.
+                          (mu - 1.5*sd, mu + 1.5*sd).
 
-    Implementation: smooth 6-stop gradient parameterised by `t` in
-    [0, 1], where t = (v - lo) / (hi - lo). Stops:
-      0.00 = deep blue, 0.20 = blue-cool, 0.40 = cool-neutral,
-      0.60 = neutral-tan, 0.80 = amber-tan, 1.00 = gold.
+    Palette stops (perceptually-tuned diverging):
+      0.00 deep blue, 0.20 light blue, 0.45 muted slate,
+      0.55 warm pale, 0.80 orange, 1.00 deep red.
     """
     if stuff_plus_val is None:
         return "#1a2030"
@@ -2921,15 +2924,14 @@ def _zone_color(stuff_plus_val: float, is_inside_zone: bool = True,
     if hi <= lo:
         hi = lo + 1.0
     t = max(0.0, min(1.0, (v - lo) / (hi - lo)))
-    # 6-stop gradient (deep blue → gold)
     stops = [
-        (0.00, (60,  90,  160)),   # deep blue
-        (0.20, (70,  100, 160)),
-        (0.40, (90,  115, 155)),
-        (0.55, (120, 130, 140)),   # neutral
-        (0.70, (160, 140, 110)),
-        (0.85, (184, 148, 88)),
-        (1.00, (212, 168, 72)),    # gold
+        (0.00, ( 36,  84, 168)),   # deep blue
+        (0.20, ( 90, 145, 210)),   # light blue
+        (0.40, (170, 195, 220)),   # pale blue
+        (0.50, (228, 222, 210)),   # mid neutral
+        (0.60, (245, 215, 170)),   # warm pale
+        (0.80, (235, 130,  90)),   # orange
+        (1.00, (200,  35,  50)),   # deep red
     ]
     # Find bracketing stops and lerp
     for i in range(len(stops) - 1):
@@ -2941,8 +2943,6 @@ def _zone_color(stuff_plus_val: float, is_inside_zone: bool = True,
             break
     else:
         rgb = stops[-1][1]
-    if not is_inside_zone:
-        rgb = tuple(int(c * 0.55) for c in rgb)
     return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
 
 
@@ -3082,57 +3082,107 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
     pad_bottom = 4
     total_h = pad_top + grid_h + pad_bottom
 
-    # SVG filter applies a small Gaussian blur to the whole heatmap
-    # group so neighbouring cells visually bleed into each other,
-    # producing the smooth-gradient look. The blur stdDeviation is
-    # tuned so cell boundaries vanish but the overall pattern stays.
-    _blur_sd = max(2.0, cell_size * 0.18)
+    # ── Build dense source matrices from the 5×5 cell grid ──────────
+    # Bilinear interpolation up to SUB×SUB sub-pixels gives a true
+    # continuous gradient before the final smoothing blur. The previous
+    # version blurred a 5×5 source which left visible block artefacts;
+    # this one interpolates the value (and opacity) at every sub-pixel
+    # location so the source is already smooth.
+    SUB = 22                                        # sub-grid resolution
+    src_v   = [[None] * 5 for _ in range(5)]        # source value matrix
+    src_op  = [[1.0]  * 5 for _ in range(5)]        # source opacity matrix
+    for ri, row in enumerate(_ZONE_GRID):
+        for ci, zone in enumerate(row):
+            sp = zone_scores.get(zone) if zone_scores else None
+            src_v[ri][ci] = sp
+            # Pre-compute per-cell opacity from coverage + uncertainty
+            op = 1.0
+            cov = (zone_coverage or {}).get(zone, 0)
+            if cov < 100:    op = min(op, 0.35)
+            elif cov < 500:  op = min(op, 0.65)
+            elif cov < 2000: op = min(op, 0.85)
+            ci_w = (uncertainty or {}).get(zone) if uncertainty else None
+            if ci_w is not None:
+                if   ci_w >= 25: op = min(op, 0.40)
+                elif ci_w >= 15: op = min(op, 0.70)
+                elif ci_w >= 10: op = min(op, 0.90)
+            src_op[ri][ci] = op
+
+    def _bilinear(grid, di, dj, default=None):
+        """Bilinear interpolate `grid[5][5]` at fractional position
+        (di, dj) where di, dj are in [0, 4]. Missing source cells are
+        treated as absent; weights renormalise over the present cells."""
+        i0 = max(0, min(int(di), 3)); j0 = max(0, min(int(dj), 3))
+        i1 = i0 + 1; j1 = j0 + 1
+        tx = di - i0; ty = dj - j0
+        corners = [
+            (i0, j0, (1 - tx) * (1 - ty)),
+            (i1, j0, tx       * (1 - ty)),
+            (i0, j1, (1 - tx) * ty),
+            (i1, j1, tx       * ty),
+        ]
+        num = den = 0.0
+        for ci_, cj_, w in corners:
+            v = grid[ci_][cj_]
+            if v is None:
+                continue
+            num += v * w
+            den += w
+        return (num / den) if den > 0 else default
+
+    # ── SVG header with a heavier two-stage smoothing filter ─────────
+    # Two cascaded Gaussian blurs produce a more organic falloff than a
+    # single hard blur and avoid the slight rectangular tells that
+    # remain at sharp boundaries.
+    _blur_sd = max(1.2, cell_size * 0.12)
     svg_parts = [
         f'<svg width="{grid_w}" height="{total_h}" '
         f'viewBox="0 0 {grid_w} {total_h}" '
         f'xmlns="http://www.w3.org/2000/svg" '
+        f'shape-rendering="crispEdges" '
         f'style="display:block;margin:0 auto">',
-        # Title
         f'<text x="{grid_w//2}" y="16" font-family="JetBrains Mono,monospace" '
         f'font-size="11" font-weight="700" fill="#8aaab8" '
         f'letter-spacing="1.5" text-anchor="middle">{title}</text>',
-        # Smoothing filter
-        f'<defs><filter id="hm_blur" x="-10%" y="-10%" width="120%" height="120%">'
-        f'<feGaussianBlur in="SourceGraphic" stdDeviation="{_blur_sd:.1f}"/>'
-        f'</filter></defs>',
+        # Filter: two-pass Gaussian for organic smoothness, kept tight
+        # since the source is already dense via bilinear interpolation.
+        f'<defs>'
+        f'<filter id="hm_blur" x="-8%" y="-8%" width="116%" height="116%">'
+        f'<feGaussianBlur in="SourceGraphic" stdDeviation="{_blur_sd:.2f}" result="b1"/>'
+        f'<feGaussianBlur in="b1"            stdDeviation="{_blur_sd*0.5:.2f}"/>'
+        f'</filter>'
+        f'</defs>',
         '<g filter="url(#hm_blur)">',
     ]
 
-    for ri, row in enumerate(_ZONE_GRID):
-        for ci, zone in enumerate(row):
-            x = ci * cell_size
-            y = pad_top + ri * cell_size
-            sp = zone_scores.get(zone) if zone_scores else None
-            is_inside = zone in _INSIDE_ZONES
-            fill = _zone_color(sp, is_inside,
-                                 anchor_lo=anchor_lo, anchor_hi=anchor_hi)
-            # Opacity from BOTH training coverage and uncertainty.
-            opacity = 1.0
-            cov = (zone_coverage or {}).get(zone, 0)
-            if cov < 100:    opacity = min(opacity, 0.35)
-            elif cov < 500:  opacity = min(opacity, 0.65)
-            elif cov < 2000: opacity = min(opacity, 0.85)
-            ci_w = (uncertainty or {}).get(zone) if uncertainty else None
-            if ci_w is not None:
-                if   ci_w >= 25:  opacity = min(opacity, 0.40)
-                elif ci_w >= 15:  opacity = min(opacity, 0.70)
-                elif ci_w >= 10:  opacity = min(opacity, 0.90)
-            # Slightly oversize each cell so the blurred halos overlap
-            # cleanly and there are no thin gaps at boundaries.
-            _ox = cell_size * 0.10
+    # ── Render the dense sub-grid ────────────────────────────────────
+    # Each sub-pixel rect overlaps its neighbours slightly so adjacent
+    # colors blend without seam lines surviving the blur.
+    px_w = grid_w / SUB
+    px_h = (5 * cell_size) / SUB
+    _overdraw = 0.4
+    for di in range(SUB):
+        gi = (di / max(SUB - 1, 1)) * 4.0
+        for dj in range(SUB):
+            gj = (dj / max(SUB - 1, 1)) * 4.0
+            # Sample at (gi, gj). Note coordinate order: SVG x=column, y=row,
+            # so the column axis (dj) drives the source `cj`, not `ci`.
+            val = _bilinear(src_v, gi, gj)
+            if val is None:
+                continue
+            op  = _bilinear(src_op, gi, gj, default=1.0)
+            color = _zone_color(val,
+                                  anchor_lo=anchor_lo, anchor_hi=anchor_hi)
+            x = dj * px_w - _overdraw / 2
+            y = pad_top + di * px_h - _overdraw / 2
             svg_parts.append(
-                f'<rect x="{x - _ox/2:.1f}" y="{y - _ox/2:.1f}" '
-                f'width="{cell_size + _ox:.1f}" height="{cell_size + _ox:.1f}" '
-                f'opacity="{opacity}" fill="{fill}"/>'
+                f'<rect x="{x:.2f}" y="{y:.2f}" '
+                f'width="{px_w + _overdraw:.2f}" '
+                f'height="{px_h + _overdraw:.2f}" '
+                f'opacity="{op:.2f}" fill="{color}"/>'
             )
 
-    # Close the blurred-group + render the strike-zone boundary OUTSIDE
-    # the blur filter so it stays a crisp gold rectangle.
+    # Close blurred group; strike-zone outline goes OUTSIDE so it stays crisp.
     svg_parts.append('</g>')
 
     # Strike zone boundary (between rows 1-3 and cols 1-3)
