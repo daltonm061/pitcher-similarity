@@ -2874,10 +2874,27 @@ def _score_zone_grid(shape_row: dict, pitcher_hand: str = "R",
                 shrunk[z] = round(float(adj), 1)
             out[plat_key] = shrunk
 
-    # ── Color anchor for this metric × pitch type (#2) ────────────────
-    if _is_v6 and _norms_table:
-        # Anchor on (μ - 1.5σ, μ + 1.5σ) after standardising to 100/10 scale.
-        # That's 100 ± 15 in display units.
+    # ── Per-pitch dynamic color anchor ───────────────────────────────
+    # Anchor on THIS pitch's own cell-prediction percentiles so the
+    # heatmap always uses the full blue→red spectrum showing relative
+    # best vs worst zones for this specific pitch. The 5th/95th
+    # percentile (across both stands, pooled) defines the extremes.
+    # A minimum total spread of 6 display units prevents the anchor
+    # from collapsing on near-uniform predictions, which would produce
+    # all-red or all-blue noise heatmaps for low-variance pitches.
+    _all_cell_vals = [v for plat in ("vs_rhb", "vs_lhb")
+                       for v in out[plat].values() if v is not None]
+    if len(_all_cell_vals) >= 5:
+        try:
+            arr = _np.array(_all_cell_vals, dtype=float)
+            p5  = float(_np.percentile(arr, 5))
+            p95 = float(_np.percentile(arr, 95))
+        except Exception:
+            p5, p95 = min(_all_cell_vals), max(_all_cell_vals)
+        center = (p5 + p95) / 2.0
+        half = max((p95 - p5) / 2.0, 3.0)
+        anchor_lo, anchor_hi = center - half, center + half
+    elif _is_v6 and _norms_table:
         anchor_lo, anchor_hi = 100 - 15, 100 + 15
     else:
         anchor_lo, anchor_hi = 80.0, 130.0
