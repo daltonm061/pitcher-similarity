@@ -1039,25 +1039,41 @@ import glob as _glob
 def load_zone_stuff():
     """Load zone-Stuff+ bundle, scanning models/ for any zone_stuff_*.joblib.
     Returns None if no valid bundle found.
+
+    Validation accepts both v5 and v6 bundle schemas:
+      v5  : keys "model", "norms"
+      v6+ : keys "composite_model", "per_type_stuff_norms"
+    Each is checked independently. Mixed-but-incomplete bundles are
+    still rejected.
     """
     pattern = "models/zone_stuff_*.joblib"
     candidates = sorted(_glob.glob(pattern), reverse=True)  # newest version first
     if not candidates:
-        # Also try without models/ prefix in case of working-dir weirdness
         candidates = sorted(_glob.glob("zone_stuff_*.joblib"), reverse=True)
+    # Always-required keys (schema-independent)
+    _required_common = ["features", "cat_features", "group_to_int",
+                         "per_type_scalers", "fallback_scaler"]
+    # v5 vs v6 distinguishing keys — at least one set must be present.
+    _v5_keys = ("model", "norms")
+    _v6_keys = ("composite_model", "per_type_stuff_norms")
     for path in candidates:
         try:
             b = _joblib.load(path)
         except Exception as _e:
             print(f"  ! failed to load {path}: {_e}")
             continue
-        required = ["model", "features", "cat_features", "group_to_int",
-                     "norms", "per_type_scalers", "fallback_scaler"]
-        missing = [k for k in required if k not in b]
-        if missing:
-            print(f"  ! {path} is missing keys: {missing}")
+        missing_common = [k for k in _required_common if k not in b]
+        has_v5 = all(k in b for k in _v5_keys)
+        has_v6 = all(k in b for k in _v6_keys)
+        if missing_common or not (has_v5 or has_v6):
+            print(f"  ! {path} schema check failed — "
+                  f"missing common: {missing_common}, "
+                  f"v5-schema: {has_v5}, v6-schema: {has_v6}")
             continue
-        print(f"  ✓ Loaded zone-Stuff+ bundle: {path} (version={b.get('version', 'unknown')})")
+        ver = b.get("version", "unknown")
+        schema = "v6" if has_v6 else "v5"
+        print(f"  ✓ Loaded zone-Stuff+ bundle: {path} "
+              f"(version={ver}, schema={schema})")
         return b
     return None
 
@@ -3034,124 +3050,6 @@ def _load_batter_zone_lookup(batter_id: str, pitch_group: str) -> dict:
         }
     except Exception:
         return {}
-
-
-def _render_side_view_svg(shape_row: dict, title: str = "Approach Angle",
-                            width: int = 220, height: int = 130) -> str:
-    """Side-view trajectory visualisation (#11).
-
-    Shows how the pitch arrives at the plate in the vertical plane:
-    horizontal axis is approach distance (release → plate), vertical
-    axis is height. The trajectory arc is plotted from release point to
-    the plate's vertical mid-line, with the strike-zone band shaded.
-
-    Uses the per-pitch row's `vaa_raw` (approach angle), `start_speed`
-    (velocity), `rel_height` (release height), and `ivb_in` (induced
-    vertical break) to estimate the ball's flight path.
-
-    This complements the plate-view heatmap by helping coaches see
-    "high vs flat" pitches — a 7" IVB at 90 mph from a 5.0 ft slot
-    arrives with a much flatter VAA than the same shape from a 6.5 ft
-    slot. The side view makes that geometry obvious.
-    """
-    rh   = float(shape_row.get("rel_height", 5.8) or 5.8)
-    velo = float(shape_row.get("start_speed", 92.0) or 92.0)
-    ivb  = float(shape_row.get("ivb_in", 14.0) or 14.0)
-    vaa  = shape_row.get("vaa_raw")
-    if vaa is None:
-        vaa = float(shape_row.get("vaa", -5.0) or -5.0)
-    vaa = float(vaa)
-    ext  = float(shape_row.get("extension", 6.4) or 6.4)
-
-    # Plate-side coordinates
-    rel_dist = 60.5 - ext        # ~54 ft of free flight
-    # Vertical drop from release to plate, derived from VAA:
-    #   drop = rel_dist × tan(|vaa|)
-    import math as _math
-    drop = rel_dist * _math.tan(_math.radians(abs(vaa)))
-    plate_z = rh - drop          # ball arrives at plate at this height
-
-    # SVG layout — 60 ft of distance maps to width-px, 0 to 6 ft maps to height-px (flipped)
-    pad_l, pad_r, pad_t, pad_b = 14, 8, 22, 18
-    inner_w = width - pad_l - pad_r
-    inner_h = height - pad_t - pad_b
-    def _x(d_ft):  # 0 ft = release, 60 ft = plate
-        return pad_l + inner_w * (d_ft / 60.0)
-    def _y(z_ft):  # 0 ft = bottom, 6 ft = top
-        return pad_t + inner_h * (1.0 - z_ft / 6.0)
-
-    # Strike zone band (1.5 ft to 3.5 ft at the plate)
-    sz_y_top = _y(3.5); sz_y_bot = _y(1.5)
-    plate_x  = _x(60.5)
-    # Release point
-    rel_x = _x(60.5 - rel_dist)   # release is at distance = ext from rubber
-    rel_y = _y(rh)
-    end_x = plate_x; end_y = _y(plate_z)
-
-    # Parabolic trajectory between rel and end (Magnus + gravity proxy)
-    # We sample 12 points along a quadratic Bezier through a control point
-    # offset by IVB direction (upward IVB = control point pushed UP).
-    ctrl_x = (rel_x + end_x) / 2
-    # Vertical break flattens the descent; positive ivb (rising) pushes
-    # the control point HIGHER (less drop mid-flight).
-    ctrl_y = (rel_y + end_y) / 2 - (ivb * 0.6)
-    pts = []
-    for k in range(13):
-        t = k / 12.0
-        bx = (1-t)**2 * rel_x + 2*(1-t)*t * ctrl_x + t**2 * end_x
-        by = (1-t)**2 * rel_y + 2*(1-t)*t * ctrl_y + t**2 * end_y
-        pts.append((bx, by))
-
-    # Color the trajectory by VAA bucket (steeper → bluer, flatter → gold)
-    def _vaa_color(a):
-        a = abs(float(a))
-        if a <= 4.5: return "#d4a848"   # very flat (good rising FB)
-        if a <= 5.5: return "#c0a878"
-        if a <= 6.5: return "#8aaab8"
-        if a <= 7.5: return "#7090b8"
-        return "#6080b0"
-    traj_color = _vaa_color(vaa)
-
-    parts = [
-        f'<svg width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" '
-        f'style="display:block;margin:8px auto 0 auto;background:#0a1218;'
-        f'border-radius:6px">',
-        f'<text x="{width//2}" y="14" font-family="JetBrains Mono,monospace" '
-        f'font-size="10" font-weight="700" fill="#8aaab8" '
-        f'letter-spacing="1.5" text-anchor="middle">{title}</text>',
-        # ground line
-        f'<line x1="{pad_l}" y1="{_y(0)}" x2="{width-pad_r}" y2="{_y(0)}" '
-        f'stroke="#2a3a50" stroke-width="1"/>',
-        # strike zone band
-        f'<rect x="{plate_x - 3}" y="{sz_y_top}" width="6" '
-        f'height="{sz_y_bot - sz_y_top}" '
-        f'fill="#c4914820" stroke="#c0a878" stroke-width="1.2"/>',
-        # plate marker
-        f'<line x1="{plate_x}" y1="{_y(0)}" x2="{plate_x}" y2="{_y(0.2)}" '
-        f'stroke="#c0a878" stroke-width="2"/>',
-        # release point
-        f'<circle cx="{rel_x}" cy="{rel_y}" r="4" fill="{traj_color}" '
-        f'stroke="white" stroke-width="0.7"/>',
-        # trajectory polyline
-        '<polyline points="' +
-        " ".join(f"{x:.1f},{y:.1f}" for x, y in pts) +
-        f'" fill="none" stroke="{traj_color}" stroke-width="2.4" '
-        f'opacity="0.9"/>',
-        # arriving point
-        f'<circle cx="{end_x}" cy="{end_y}" r="3.5" fill="{traj_color}" '
-        f'stroke="white" stroke-width="0.6"/>',
-        # VAA label
-        f'<text x="{width-pad_r}" y="{height-4}" font-family="JetBrains Mono,monospace" '
-        f'font-size="9" fill="#7a9ab0" text-anchor="end">'
-        f'VAA {vaa:.1f}°  ·  velo {velo:.0f}</text>',
-        # rel height label
-        f'<text x="{pad_l}" y="{height-4}" font-family="JetBrains Mono,monospace" '
-        f'font-size="9" fill="#7a9ab0" text-anchor="start">'
-        f'release {rh:.2f} ft</text>',
-        '</svg>',
-    ]
-    return "".join(parts)
 
 
 def _render_zone_heatmap_svg(zone_scores: dict, title: str,
@@ -8494,17 +8392,11 @@ function _dmCopyShareLink() {{
                                     anchor_lo=_anchor[0], anchor_hi=_anchor[1],
                                     uncertainty=(_unc or {}).get("vs_lhb") if _unc else None,
                                 )
-                                # Side-view trajectory (#11)
-                                _side = _render_side_view_svg(
-                                    shape_row, title=f"{group} — Side View",
-                                )
-                                hm_cols = st.columns([1, 1, 1])
+                                hm_cols = st.columns([1, 1])
                                 with hm_cols[0]:
                                     st.markdown(hm_rhb, unsafe_allow_html=True)
                                 with hm_cols[1]:
                                     st.markdown(hm_lhb, unsafe_allow_html=True)
-                                with hm_cols[2]:
-                                    st.markdown(_side, unsafe_allow_html=True)
                                 st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
 
