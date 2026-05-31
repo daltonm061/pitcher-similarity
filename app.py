@@ -3075,12 +3075,17 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
     Each cell renders a `<title>` element with the value, coverage, and
     CI width so coaches can hover to get more context (#10).
     """
-    # 5×5 grid + label area
-    grid_w = cell_size * 5
-    grid_h = cell_size * 5
-    pad_top = 28      # title row
+    # 5×5 grid + label area. Cells are stretched vertically so the
+    # rendered strike zone matches the real-world proportions
+    # (17"  wide × 24" tall ⇒ height ≈ 1.4 × width).
+    _STRIKE_ZONE_ASPECT = 24.0 / 17.0   # ≈ 1.41
+    cell_w  = cell_size
+    cell_h  = cell_size * _STRIKE_ZONE_ASPECT
+    grid_w  = cell_w * 5
+    grid_h  = cell_h * 5
+    pad_top    = 28
     pad_bottom = 4
-    total_h = pad_top + grid_h + pad_bottom
+    total_h    = pad_top + grid_h + pad_bottom
 
     # ── Build dense source matrices from the 5×5 cell grid ──────────
     # Bilinear interpolation up to SUB×SUB sub-pixels produces a fully
@@ -3144,7 +3149,7 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
     # Each sub-pixel rect overlaps its neighbours by 1px so no seams
     # survive even at the smallest render sizes.
     px_w = grid_w / SUB
-    px_h = (5 * cell_size) / SUB
+    px_h = grid_h / SUB
     _overdraw = 1.0
     for di in range(SUB):
         gi = (di / max(SUB - 1, 1)) * 4.0
@@ -3165,14 +3170,18 @@ def _render_zone_heatmap_svg(zone_scores: dict, title: str,
                 f'opacity="{op:.2f}" fill="{color}"/>'
             )
 
-    # Strike zone boundary (between rows 1-3 and cols 1-3)
-    sz_x = cell_size
-    sz_y = pad_top + cell_size
-    sz_w = cell_size * 3
-    sz_h = cell_size * 3
+    # Strike zone boundary — wraps the central 3×3 cells, which now
+    # occupy a vertically-stretched footprint matching the real plate
+    # proportions (17" × 24"). White outline for maximum contrast
+    # against both blue and red ends of the diverging palette.
+    sz_x = cell_w
+    sz_y = pad_top + cell_h
+    sz_w = cell_w * 3
+    sz_h = cell_h * 3
     svg_parts.append(
         f'<rect x="{sz_x}" y="{sz_y}" width="{sz_w}" height="{sz_h}" '
-        f'fill="none" stroke="#c0a878" stroke-width="2"/>'
+        f'fill="none" stroke="#ffffff" stroke-width="2.5" '
+        f'stroke-opacity="0.95"/>'
     )
 
     svg_parts.append('</svg>')
